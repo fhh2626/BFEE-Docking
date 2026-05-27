@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/fhh2626/BFEE-Docking/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: E06AB268F5AA8742D68098D242C9066B3B0B63C55E75FB274F1F278DFD1F2B5E
+  sha256: 48DE5D0FDB7755A14079A7E9411AC965FF87AED0B77D1F86AD34B121B1F504E2
 
 build:
   number: 0
