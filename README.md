@@ -15,7 +15,7 @@ Main features:
 - pH-dependent protonation-state handling
 - Binding-site definition by blind docking, pocket prediction, co-crystallized ligand, or manual input
 - Rigid docking and flexible redocking
-- Support for DSDP, smina, AutoDock Vina, QVina2, and QVinaW
+- Support for DSDP, smina, AutoDock Vina, QVina2, QVinaW and GNINA
 - PyMOL-based visualization of intermediate results
 - Preparation of MD-ready files for OpenMM simulations
 - Support for MM-GBSA calculations
