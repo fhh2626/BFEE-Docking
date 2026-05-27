@@ -28,7 +28,6 @@ requirements:
     - dimorphite-dl
     - mdanalysis
     - numba
-    - openbabel
     - pdb2pqr
     - pdb-tools
     - platformdirs
