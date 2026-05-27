@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+recursive-include bfee_docking/resources *
+recursive-include bfee_docking/styles *
+recursive-include bfee_docking/licenses *
+recursive-include bfee_docking/third_party *
+recursive-include bfee_docking *.py
+prune **/__pycache__
+global-exclude *.py[cod]
+global-exclude *.nbi
+global-exclude *.nbc

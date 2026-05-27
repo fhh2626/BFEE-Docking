@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bfee-docking"
+version = "1.0.0rc7"
+description = "GUI workflow for BFEE-Docking"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Haohao Fu", email = "fhh2626@gmail.com" }
+]
+dependencies = [
+  "biotite",
+  "biopython",
+  "dimorphite-dl",
+  "MDAnalysis",
+  "numba",
+  "pdb2pqr",
+  "pdb-tools",
+  "platformdirs",
+  "PySide6",
+  "rdkit",
+  "scipy"
+]
+
+[project.urls]
+Homepage = "https://github.com/fhh2626/BFEE-Docking"
+Repository = "https://github.com/fhh2626/BFEE-Docking"
+Issues = "https://github.com/fhh2626/BFEE-Docking/issues"
+
+[project.scripts]
+bfee-docking = "bfee_docking.main_gui:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["bfee_docking*"]
