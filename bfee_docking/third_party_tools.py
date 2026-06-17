@@ -269,6 +269,56 @@ def get_smina_executable() -> pathlib.Path:
     return _THIRD_PARTY_DIR / "smina" / smina_name
 
 
+def _get_bundled_or_system_executable(
+    bundled_dir: pathlib.Path,
+    executable_name: str,
+    command_name: str,
+) -> pathlib.Path:
+    """
+    Prefer a bundled executable, then fall back to the current environment.
+    """
+    executable = bundled_dir / executable_name
+    if executable.exists():
+        return executable
+
+    system_executable = shutil.which(command_name)
+    if system_executable:
+        return pathlib.Path(system_executable).resolve()
+
+    return pathlib.Path(command_name)
+
+
+def get_qvina_executable(engine: str) -> pathlib.Path:
+    """
+    Get the path to a qvina-family executable.
+
+    Args:
+        engine: One of "qvina2", "qvinaw", or "vina-classic".
+
+    Returns:
+        pathlib.Path: Bundled executable path if available, otherwise a PATH
+                      executable path or command name.
+    """
+    executable_stems = {
+        "qvina2": "qvina2",
+        "qvinaw": "qvinaw",
+        "vina-classic": "vina",
+    }
+    command_names = {
+        "qvina2": "qvina2",
+        "qvinaw": "qvinaw",
+        "vina-classic": "vina",
+    }
+
+    stem = executable_stems[engine]
+    executable_name = f"{stem}.exe" if os.name == 'nt' else stem
+    return _get_bundled_or_system_executable(
+        _THIRD_PARTY_DIR / "qvina",
+        executable_name,
+        command_names[engine],
+    )
+
+
 def get_docking_executable(engine: str) -> pathlib.Path:
     """
     Get the path to a docking engine executable.
@@ -277,8 +327,9 @@ def get_docking_executable(engine: str) -> pathlib.Path:
         engine: Name of the docking engine. Supported values:
                 - "vina-new": AutoDock Vina (bundled)
                 - "smina": smina (bundled)
-                - "vina-classic", "qvina2", "qvinaw": Uses system PATH
-    
+                - "vina-classic", "qvina2", "qvinaw": Prefer bundled qvina,
+                  then fall back to the current environment
+
     Returns:
         pathlib.Path: Absolute path to the docking executable.
     
@@ -300,11 +351,45 @@ def get_docking_executable(engine: str) -> pathlib.Path:
             )
         return executable
     elif engine in ["vina-classic", "qvina2", "qvinaw"]:
-        # These use system PATH, return the command name as Path
-        cmd_name = "vina" if engine == "vina-classic" else engine
-        return pathlib.Path(cmd_name)
+        return get_qvina_executable(engine)
     else:
         raise ValueError(f"Unknown docking engine: {engine}")
+
+
+def get_docking_subprocess_env(executable: str | pathlib.Path) -> dict[str, str] | None:
+    """
+    Get subprocess environment overrides for bundled docking executables.
+
+    Bundled qvina binaries ship with same-directory DLL/SO dependencies. When
+    such a binary is used, expose its directory to the platform dynamic loader.
+    """
+    executable_path = pathlib.Path(executable)
+    qvina_dir = _THIRD_PARTY_DIR / "qvina"
+
+    try:
+        resolved_executable = executable_path.resolve()
+        resolved_qvina_dir = qvina_dir.resolve()
+    except OSError:
+        return None
+
+    if not executable_path.exists() or resolved_executable.parent != resolved_qvina_dir:
+        return None
+
+    env = os.environ.copy()
+    qvina_dir_str = str(resolved_qvina_dir)
+
+    if os.name == 'nt':
+        current_path = env.get("PATH", "")
+        env["PATH"] = qvina_dir_str if not current_path else f"{qvina_dir_str}{os.pathsep}{current_path}"
+    else:
+        current_ld_library_path = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            qvina_dir_str
+            if not current_ld_library_path
+            else f"{qvina_dir_str}{os.pathsep}{current_ld_library_path}"
+        )
+
+    return env
 
 
 # ========== Force Field Files ==========
@@ -407,6 +492,18 @@ def get_all_tool_paths() -> dict:
         "smina": {
             "path": str(get_smina_executable()),
             "exists": get_smina_executable().exists()
+        },
+        "qvina2": {
+            "path": str(get_docking_executable("qvina2")),
+            "exists": get_docking_executable("qvina2").exists()
+        },
+        "qvinaw": {
+            "path": str(get_docking_executable("qvinaw")),
+            "exists": get_docking_executable("qvinaw").exists()
+        },
+        "vina_classic": {
+            "path": str(get_docking_executable("vina-classic")),
+            "exists": get_docking_executable("vina-classic").exists()
         },
         "protein_topology": {
             "path": str(get_protein_topology_file()),
@@ -563,4 +660,3 @@ def run_vmd(
         print(f"STDOUT:\n{e.stdout}")
         print(f"STDERR:\n{e.stderr}")
         raise
-
