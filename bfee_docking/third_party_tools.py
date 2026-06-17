@@ -208,14 +208,12 @@ def get_obabel_executable() -> pathlib.Path:
     
     Returns:
         pathlib.Path: Absolute path to the obabel executable.
-                      On Windows: third_party/obabel/obabel.exe
-                      On non-Windows: prefer obabel from the current environment,
-                      then fall back to third_party/obabel/obabel
+                      Prefer obabel from the current environment, then fall
+                      back to third_party/obabel/obabel(.exe).
     """
-    if os.name != 'nt':
-        system_obabel = shutil.which("obabel")
-        if system_obabel:
-            return pathlib.Path(system_obabel).resolve()
+    system_obabel = shutil.which("obabel")
+    if system_obabel:
+        return pathlib.Path(system_obabel).resolve()
 
     obabel_name = "obabel.exe" if os.name == 'nt' else "obabel"
     return _THIRD_PARTY_DIR / "obabel" / obabel_name
