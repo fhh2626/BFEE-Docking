@@ -172,6 +172,18 @@ def _apply_pdb2pqr_peoe_patch():
 import pdb2pqr.main as _pdb2pqr_main
 
 
+def _get_pdb2pqr_main_callable():
+    """Return pdb2pqr's CLI entry point across supported package layouts."""
+    if callable(_pdb2pqr_main):
+        return _pdb2pqr_main
+
+    main_func = getattr(_pdb2pqr_main, "main", None)
+    if callable(main_func):
+        return main_func
+
+    raise PDB2PQRError("Could not find a callable pdb2pqr main entry point")
+
+
 # ========== Module Constants ==========
 # Get the directory containing this file (used as base for all third-party paths)
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -606,8 +618,7 @@ def run_pdb2pqr(
     original_argv = sys.argv
     try:
         sys.argv = argv
-        # pdb2pqr.main IS the main function itself (not a module with a main function)
-        _pdb2pqr_main()
+        _get_pdb2pqr_main_callable()()
     except SystemExit as e:
         # pdb2pqr calls sys.exit(0) on success, sys.exit(1) on failure
         if e.code != 0:

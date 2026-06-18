@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bfee-docking"
-version = "1.0.0rc7"
+dynamic = ["version"]
 description = "GUI workflow for BFEE-Docking"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -21,7 +21,7 @@ dependencies = [
   "pdb-tools",
   "platformdirs",
   "PySide6",
-  "pymol-open-source",
+  "pymol-opensource-wl",
   "openbabel",
   "rdkit",
   "scipy"
@@ -37,6 +37,9 @@ bfee-docking = "bfee_docking.main_gui:main"
 
 [tool.setuptools]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "bfee_docking._version.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["bfee_docking*"]

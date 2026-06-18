@@ -52,7 +52,7 @@ Their source code corresponding to the bundled version:
 conda create -c conda-forge -n bfee_dock
 conda activate bfee_dock
 
-conda install -c conda-forge biotite biopython dimorphite-dl mdanalysis numba pdb2pqr pdb-tools pyside6 pymol-open-source qvina rdkit scipy
+conda install -c conda-forge biotite biopython dimorphite-dl mdanalysis numba pdb2pqr pdb-tools pyside6 pymol-opensource-wl qvina rdkit scipy
 
 python main_gui.py
 ```

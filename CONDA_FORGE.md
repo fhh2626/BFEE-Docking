@@ -4,7 +4,7 @@ This repository includes a conda-forge recipe in `recipe/`.
 
 ## Strategy
 
-- `qvina`, `pymol-open-source`, `openbabel`, `rdkit`, and the Python scientific
+- `qvina`, `pymol-opensource-wl`, `openbabel`, `rdkit`, and the Python scientific
   stack are declared as conda-forge runtime dependencies.
 - Bundled `vina` and `smina` are kept inside `bfee_docking/third_party`.
 - macOS is skipped.
@@ -49,7 +49,8 @@ For the conda-forge PR, keep `source.url` and replace `PUT_SHA256_HERE` with the
 SHA256 of the GitHub tag archive:
 
 ```bash
-curl -L -o bfee-docking.tar.gz https://github.com/fhh2626/BFEE-Docking/archive/refs/tags/v1.0.0rc7.tar.gz
+VERSION=$(python -c "from bfee_docking import __version__; print(__version__)")
+curl -L -o bfee-docking.tar.gz "https://github.com/fhh2626/BFEE-Docking/archive/refs/tags/v${VERSION}.tar.gz"
 sha256sum bfee-docking.tar.gz
 ```
 

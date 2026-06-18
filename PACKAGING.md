@@ -17,7 +17,7 @@ python -m pip install --upgrade build wheel twine
 The output is written to:
 
 ```text
-dist/windows/bfee_docking-1.0.0rc7-py3-none-win_amd64.whl
+dist/windows/bfee_docking-<version>-py3-none-win_amd64.whl
 ```
 
 The Windows build script removes the Linux `vina` and `smina` binaries from its
@@ -36,7 +36,7 @@ bash scripts/build_linux_wheel.sh
 The output is written to:
 
 ```text
-dist/linux/bfee_docking-1.0.0rc7-py3-none-manylinux2014_x86_64.whl
+dist/linux/bfee_docking-<version>-py3-none-manylinux2014_x86_64.whl
 ```
 
 The Linux build script removes Windows executables, DLLs, batch files, jars,
