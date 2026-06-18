@@ -7,7 +7,7 @@ name = "bfee-docking"
 dynamic = ["version"]
 description = "GUI workflow for BFEE-Docking"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 authors = [
   { name = "Haohao Fu", email = "fhh2626@gmail.com" }
 ]
