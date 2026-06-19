@@ -35,6 +35,7 @@ Bundled third-party components:
 - OpenBabel 3.1.1 (binary): GPL-2.0
 - smina 2020.12.10 (binary): GPL-2.0
 - AutoDock Vina 1.2.7 (binary): Apache-2.0
+- QuickVina-W/2 (binary): Apache-2.0
 - DSDP-redocking (source code): Apache-2.0
 - pocketeer (source code): MIT
 
@@ -42,34 +43,14 @@ Their source code corresponding to the bundled version:
 - OpenBabel 3.1.1: https://github.com/openbabel/openbabel/releases/tag/openbabel-3-1-1
 - smina 2020.12.10: https://github.com/jaimergp/smina/releases/tag/2020.12.10
 - AutoDock Vina 1.2.7: https://github.com/ccsb-scripps/AutoDock-Vina/releases/tag/v1.2.7
+- QuickVina-W/2: https://github.com/QVina/qvina
 - DSDP-redocking: https://github.com/PKUGaoGroup/DSDP
 - pocketeer: https://github.com/cch1999/pocketeer
 
 ## Installation and Usage
 
 ```bash
-# optional
-conda create -c conda-forge -n bfee_dock
-conda activate bfee_dock
-
-conda install -c conda-forge biotite biopython dimorphite-dl mdanalysis numba pdb2pqr pdb-tools pyside6 pymol-opensource-wl qvina rdkit scipy
-
-python main_gui.py
-```
-
-On Linux platforms, BFEE-Docking will prefer `obabel` from the current environment if available, and fall back to the bundled `third_party/obabel/obabel` otherwise.
-
-Hence, one usually needs to install OpenBabel:
-
-```bash
-sudo apt install openbabel
-```
-
-One also needs to give execution permission to the smina and vina binaries:
-
-```bash
-chmod +x ./third_party/vina/vina
-chmod +x ./third_party/smina/smina
+pip install bfee-docking
 ```
 
 For servers running GPU-based docking, unzip `third_party/DSDP_redocking.zip` and enter the DSDP folder. Then type:
@@ -81,9 +62,6 @@ make
 For servers running MD simulations:
 
 ```bash
-# optional
-conda create -c conda-forge -n openmm python=3.13
-conda activate openmm
-
-conda install -c conda-forge numpy=2.2 openmm parmed mdanalysis cuda-version=12
+pip install parmed mdanalysis
+pip install "openmm[cuda13]"
 ```
