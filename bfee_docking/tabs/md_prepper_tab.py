@@ -16,8 +16,6 @@ class MDPrepperTab(QWidget):
         
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
         
         # PDB Preparation GroupBox
         pdb_prep_group = QGroupBox("PDB Preparation")
@@ -71,7 +69,6 @@ class MDPrepperTab(QWidget):
         # CHARMM PSF Generation GroupBox
         charmm_group = QGroupBox("CHARMM PSF Generation")
         charmm_layout = QVBoxLayout(charmm_group)
-        charmm_layout.setSpacing(10)
 
         # Row 1: Ligand str File
         str_file_layout = QHBoxLayout()

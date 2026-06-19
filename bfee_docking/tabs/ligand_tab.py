@@ -65,13 +65,10 @@ class LigandTab(QWidget):
         
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
         
         # Create GroupBox for Process Ligand
         process_group = QGroupBox("Process Ligand")
         layout = QVBoxLayout(process_group)
-        layout.setSpacing(15)
         
         # First row: Ligand file selection
         ligand_file_layout = QHBoxLayout()
