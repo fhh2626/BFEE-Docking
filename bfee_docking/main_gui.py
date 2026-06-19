@@ -101,12 +101,9 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        main_layout.setSpacing(10)
         
         # Output Directory Section
         output_dir_layout = QHBoxLayout()
-        output_dir_layout.setSpacing(10)
         
         output_dir_label = QLabel("Output Directory:")
         output_dir_layout.addWidget(output_dir_label)
@@ -142,7 +139,6 @@ class MainWindow(QMainWindow):
         
         # Theme Selection Section
         theme_layout = QHBoxLayout()
-        theme_layout.setSpacing(10)
         
         theme_label = QLabel("Theme:")
         theme_layout.addWidget(theme_label)

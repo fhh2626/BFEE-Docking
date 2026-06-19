@@ -15,8 +15,6 @@ class ResultsTab(QWidget):
         
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
         
         # Results GroupBox
         results_group = QGroupBox("Results")

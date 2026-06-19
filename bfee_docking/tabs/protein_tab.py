@@ -17,13 +17,10 @@ class ProteinTab(QWidget):
         
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
         
         # Create GroupBox for Process Protein
         process_group = QGroupBox("Process Protein")
         layout = QVBoxLayout(process_group)
-        layout.setSpacing(15)
         
         # Radio buttons for input selection
         radio_layout = QHBoxLayout()
@@ -152,7 +149,6 @@ class ProteinTab(QWidget):
         # Create GroupBox for Specify Docking Region
         docking_region_group = QGroupBox("Specify Docking Region")
         docking_layout = QVBoxLayout(docking_region_group)
-        docking_layout.setSpacing(15)
         
         # First row: Radio buttons and Margin
         first_row_layout = QHBoxLayout()

@@ -45,13 +45,10 @@ class DockingTab(QWidget):
         
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(15)
         
         # Create GroupBox for Docking
         docking_group = QGroupBox("Docking")
         layout = QVBoxLayout(docking_group)
-        layout.setSpacing(15)
         
         # Single row: All docking parameters centered
         # Row 1: Basic numeric parameters
