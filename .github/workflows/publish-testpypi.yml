@@ -1,0 +1,121 @@
+name: Build and publish to TestPyPI
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  BFEE_DOCKING_BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
+
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: package-version
+        name: Read package version
+        shell: bash
+        run: |
+          version=$(python -c "from bfee_docking import __version__; print(__version__)")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          tag_version="${tag_version%%-build.*}"
+          if [[ "$tag_version" != "$PACKAGE_VERSION" ]]; then
+            echo "Tag version '$tag_version' does not match package version '$PACKAGE_VERSION'." >&2
+            exit 1
+          fi
+
+  build-windows:
+    needs: validate-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build setuptools wheel
+
+      - name: Build Windows wheel
+        shell: pwsh
+        run: ./scripts/build_windows_wheel.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-${{ env.BFEE_DOCKING_BUILD_NUMBER }}
+          path: dist/windows/*.whl
+          if-no-files-found: error
+
+  build-linux:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build setuptools wheel
+
+      - name: Build Linux wheel
+        run: bash scripts/build_linux_wheel.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-${{ env.BFEE_DOCKING_BUILD_NUMBER }}
+          path: dist/linux/*.whl
+          if-no-files-found: error
+
+  publish-testpypi:
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/bfee-docking
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check distributions
+        run: |
+          python -m pip install --upgrade twine
+          python -m twine check dist/*.whl
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 2
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/

@@ -45,6 +45,15 @@ before creating the wheel.
 
 ## Check and upload
 
+Set `BFEE_DOCKING_BUILD_NUMBER` to add a wheel build tag without changing the
+package version. The value must start with a digit and may contain letters,
+digits, underscores, or dots. For example, `42.2` produces:
+
+```text
+bfee_docking-<version>-42.2-py3-none-win_amd64.whl
+bfee_docking-<version>-42.2-py3-none-manylinux2014_x86_64.whl
+```
+
 Check both wheels:
 
 ```bash
@@ -62,3 +71,13 @@ Upload to PyPI:
 ```bash
 python -m twine upload dist/windows/*.whl dist/linux/*.whl
 ```
+
+## GitHub Actions
+
+`.github/workflows/publish-testpypi.yml` builds Windows and Linux wheels with
+`${{ github.run_number }}.${{ github.run_attempt }}` as the wheel build tag,
+then publishes both files to TestPyPI using Trusted Publishing. Re-running a
+workflow therefore creates new filenames without changing the package version.
+
+Tags may be either `v<version>` or `v<version>-build.<number>`. In both cases,
+`<version>` must match `bfee_docking/_version.py`.
