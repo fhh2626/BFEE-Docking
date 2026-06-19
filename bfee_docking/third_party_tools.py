@@ -172,6 +172,18 @@ def _apply_pdb2pqr_peoe_patch():
 import pdb2pqr.main as _pdb2pqr_main
 
 
+def _get_pdb2pqr_main_callable():
+    """Return pdb2pqr's CLI entry point across supported package layouts."""
+    if callable(_pdb2pqr_main):
+        return _pdb2pqr_main
+
+    main_func = getattr(_pdb2pqr_main, "main", None)
+    if callable(main_func):
+        return main_func
+
+    raise PDB2PQRError("Could not find a callable pdb2pqr main entry point")
+
+
 # ========== Module Constants ==========
 # Get the directory containing this file (used as base for all third-party paths)
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
@@ -208,14 +220,12 @@ def get_obabel_executable() -> pathlib.Path:
     
     Returns:
         pathlib.Path: Absolute path to the obabel executable.
-                      On Windows: third_party/obabel/obabel.exe
-                      On non-Windows: prefer obabel from the current environment,
-                      then fall back to third_party/obabel/obabel
+                      Prefer obabel from the current environment, then fall
+                      back to third_party/obabel/obabel(.exe).
     """
-    if os.name != 'nt':
-        system_obabel = shutil.which("obabel")
-        if system_obabel:
-            return pathlib.Path(system_obabel).resolve()
+    system_obabel = shutil.which("obabel")
+    if system_obabel:
+        return pathlib.Path(system_obabel).resolve()
 
     obabel_name = "obabel.exe" if os.name == 'nt' else "obabel"
     return _THIRD_PARTY_DIR / "obabel" / obabel_name
@@ -269,6 +279,56 @@ def get_smina_executable() -> pathlib.Path:
     return _THIRD_PARTY_DIR / "smina" / smina_name
 
 
+def _get_bundled_or_system_executable(
+    bundled_dir: pathlib.Path,
+    executable_name: str,
+    command_name: str,
+) -> pathlib.Path:
+    """
+    Prefer a bundled executable, then fall back to the current environment.
+    """
+    executable = bundled_dir / executable_name
+    if executable.exists():
+        return executable
+
+    system_executable = shutil.which(command_name)
+    if system_executable:
+        return pathlib.Path(system_executable).resolve()
+
+    return pathlib.Path(command_name)
+
+
+def get_qvina_executable(engine: str) -> pathlib.Path:
+    """
+    Get the path to a qvina-family executable.
+
+    Args:
+        engine: One of "qvina2", "qvinaw", or "vina-classic".
+
+    Returns:
+        pathlib.Path: Bundled executable path if available, otherwise a PATH
+                      executable path or command name.
+    """
+    executable_stems = {
+        "qvina2": "qvina2",
+        "qvinaw": "qvinaw",
+        "vina-classic": "vina",
+    }
+    command_names = {
+        "qvina2": "qvina2",
+        "qvinaw": "qvinaw",
+        "vina-classic": "vina",
+    }
+
+    stem = executable_stems[engine]
+    executable_name = f"{stem}.exe" if os.name == 'nt' else stem
+    return _get_bundled_or_system_executable(
+        _THIRD_PARTY_DIR / "qvina",
+        executable_name,
+        command_names[engine],
+    )
+
+
 def get_docking_executable(engine: str) -> pathlib.Path:
     """
     Get the path to a docking engine executable.
@@ -277,8 +337,9 @@ def get_docking_executable(engine: str) -> pathlib.Path:
         engine: Name of the docking engine. Supported values:
                 - "vina-new": AutoDock Vina (bundled)
                 - "smina": smina (bundled)
-                - "vina-classic", "qvina2", "qvinaw": Uses system PATH
-    
+                - "vina-classic", "qvina2", "qvinaw": Prefer bundled qvina,
+                  then fall back to the current environment
+
     Returns:
         pathlib.Path: Absolute path to the docking executable.
     
@@ -300,11 +361,45 @@ def get_docking_executable(engine: str) -> pathlib.Path:
             )
         return executable
     elif engine in ["vina-classic", "qvina2", "qvinaw"]:
-        # These use system PATH, return the command name as Path
-        cmd_name = "vina" if engine == "vina-classic" else engine
-        return pathlib.Path(cmd_name)
+        return get_qvina_executable(engine)
     else:
         raise ValueError(f"Unknown docking engine: {engine}")
+
+
+def get_docking_subprocess_env(executable: str | pathlib.Path) -> dict[str, str] | None:
+    """
+    Get subprocess environment overrides for bundled docking executables.
+
+    Bundled qvina binaries ship with same-directory DLL/SO dependencies. When
+    such a binary is used, expose its directory to the platform dynamic loader.
+    """
+    executable_path = pathlib.Path(executable)
+    qvina_dir = _THIRD_PARTY_DIR / "qvina"
+
+    try:
+        resolved_executable = executable_path.resolve()
+        resolved_qvina_dir = qvina_dir.resolve()
+    except OSError:
+        return None
+
+    if not executable_path.exists() or resolved_executable.parent != resolved_qvina_dir:
+        return None
+
+    env = os.environ.copy()
+    qvina_dir_str = str(resolved_qvina_dir)
+
+    if os.name == 'nt':
+        current_path = env.get("PATH", "")
+        env["PATH"] = qvina_dir_str if not current_path else f"{qvina_dir_str}{os.pathsep}{current_path}"
+    else:
+        current_ld_library_path = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            qvina_dir_str
+            if not current_ld_library_path
+            else f"{qvina_dir_str}{os.pathsep}{current_ld_library_path}"
+        )
+
+    return env
 
 
 # ========== Force Field Files ==========
@@ -407,6 +502,18 @@ def get_all_tool_paths() -> dict:
         "smina": {
             "path": str(get_smina_executable()),
             "exists": get_smina_executable().exists()
+        },
+        "qvina2": {
+            "path": str(get_docking_executable("qvina2")),
+            "exists": get_docking_executable("qvina2").exists()
+        },
+        "qvinaw": {
+            "path": str(get_docking_executable("qvinaw")),
+            "exists": get_docking_executable("qvinaw").exists()
+        },
+        "vina_classic": {
+            "path": str(get_docking_executable("vina-classic")),
+            "exists": get_docking_executable("vina-classic").exists()
         },
         "protein_topology": {
             "path": str(get_protein_topology_file()),
@@ -511,8 +618,7 @@ def run_pdb2pqr(
     original_argv = sys.argv
     try:
         sys.argv = argv
-        # pdb2pqr.main IS the main function itself (not a module with a main function)
-        _pdb2pqr_main()
+        _get_pdb2pqr_main_callable()()
     except SystemExit as e:
         # pdb2pqr calls sys.exit(0) on success, sys.exit(1) on failure
         if e.code != 0:
@@ -563,4 +669,3 @@ def run_vmd(
         print(f"STDOUT:\n{e.stdout}")
         print(f"STDERR:\n{e.stderr}")
         raise
-

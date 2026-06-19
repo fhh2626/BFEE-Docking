@@ -420,7 +420,8 @@ class Docking:
                 docking_cmd,
                 capture_output=True,
                 text=True,
-                check=False
+                check=False,
+                env=third_party_tools.get_docking_subprocess_env(self._docking_executable)
             )
             
             success = result.returncode == 0

@@ -18,14 +18,13 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 
 # Project module imports
+from . import __version__
 from .gui_utils import get_app_icon
 from .tabs.protein_tab import ProteinTab
 from .tabs.ligand_tab import LigandTab
 from .tabs.docking_tab import DockingTab
 from .tabs.results_tab import ResultsTab
 from .tabs.md_prepper_tab import MDPrepperTab
-
-VERSION = "1.0.0 rc7"
 
 
 def _get_settings_path() -> pathlib.Path:
@@ -39,7 +38,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"BFEE-Docking {VERSION}")
+        self.setWindowTitle(f"BFEE-Docking {__version__}")
         
         # Set window icon
         self.setWindowIcon(get_app_icon())

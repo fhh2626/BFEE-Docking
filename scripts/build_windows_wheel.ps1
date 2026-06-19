@@ -27,6 +27,14 @@ Copy-Item -LiteralPath `
 
 Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\vina\vina") -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\smina\smina") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\qvina2") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\qvina2_split") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\qvinaw") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\qvinaw_split") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\vina") -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina\vina_split") -Force -ErrorAction SilentlyContinue
+Get-ChildItem -LiteralPath (Join-Path $stage "bfee_docking\third_party\qvina") -Filter "*.so*" -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force
 
 $env:BFEE_DOCKING_PLATFORM_TAG = "win_amd64"
 & $python -m build --wheel --no-isolation --outdir $outDir $stage
