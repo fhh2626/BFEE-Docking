@@ -33,7 +33,7 @@ All third-party license texts are included in the `licenses/` folder.
 
 Bundled third-party components:
 - OpenBabel 3.1.1 (binary): GPL-2.0
-- smina 2020.12.10 (binary): GPL-2.0
+- smina 2020.12.10 (binary): Apache-2.0
 - AutoDock Vina 1.2.7 (binary): Apache-2.0
 - QuickVina-W/2 (binary): Apache-2.0
 - DSDP-redocking (source code): Apache-2.0

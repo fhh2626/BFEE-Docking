@@ -27,7 +27,7 @@ cp -a \
 rm -f "$stage/bfee_docking/third_party/vina/vina.exe"
 rm -f "$stage/bfee_docking/third_party/smina/smina.exe"
 rm -f "$stage/bfee_docking/third_party/qvina/"*.exe
-find "$stage/bfee_docking/third_party" -type f \( -name "*.dll" -o -name "*.bat" -o -name "*.jar" \) -delete
+find "$stage/bfee_docking/third_party" -type f \( -name "*.dll" -o -name "*.obf" -o -name "*.bat" -o -name "*.jar" \) -delete
 rm -rf "$stage/bfee_docking/third_party/obabel"
 chmod +x "$stage/bfee_docking/third_party/vina/vina"
 chmod +x "$stage/bfee_docking/third_party/smina/smina"
