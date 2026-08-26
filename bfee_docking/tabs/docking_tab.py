@@ -357,14 +357,43 @@ class DockingTab(QWidget):
         if hasattr(self.main_window, '_results_tab'):
              self.main_window._results_tab.update_results_table()
         
-        # Count successful docking results
+        # Count successful docking results and report failures explicitly.
         successful_docks = len([r for r in results if r.get('success', False)])
-        
-        self.main_window._show_info("Success",
-            f"Docking completed successfully!\n\n"
-            f"Total ligands: {len(results)}\n"
-            f"Successful dockings: {successful_docks}\n"
-            f"Output directory: {pathlib.Path(self.main_window._output_directory) / 'result'}")
+        failed_docks = [r for r in results if not r.get('success', False)]
+        result_dir = pathlib.Path(self.main_window._output_directory) / 'result'
+
+        if failed_docks:
+            failure_lines = []
+            for result in failed_docks[:3]:
+                ligand_name = pathlib.Path(result.get('ligand', 'ligand')).name
+                diagnostic = result.get('stderr') or result.get('error') or ''
+                diagnostic_lines = [
+                    line.strip() for line in str(diagnostic).splitlines()
+                    if line.strip()
+                ]
+                reason = diagnostic_lines[-1] if diagnostic_lines else (
+                    f"return code {result.get('return_code', 'unknown')}"
+                )
+                failure_lines.append(f"{ligand_name}: {reason}")
+
+            more = "" if len(failed_docks) <= 3 else "\n..."
+            self.main_window._show_warning(
+                "Docking completed with errors",
+                f"Docking finished with failures.\n\n"
+                f"Total ligands: {len(results)}\n"
+                f"Successful dockings: {successful_docks}\n"
+                f"Failed dockings: {len(failed_docks)}\n\n"
+                f"Diagnostics:\n{chr(10).join(failure_lines)}{more}\n\n"
+                f"Full logs: {result_dir}"
+            )
+        else:
+            self.main_window._show_info(
+                "Success",
+                f"Docking completed successfully!\n\n"
+                f"Total ligands: {len(results)}\n"
+                f"Successful dockings: {successful_docks}\n"
+                f"Output directory: {result_dir}"
+            )
     
     def _on_docking_error(self, error_msg):
         """Handle docking errors."""

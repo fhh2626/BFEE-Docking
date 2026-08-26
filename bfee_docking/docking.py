@@ -424,13 +424,28 @@ class Docking:
                 env=third_party_tools.get_docking_subprocess_env(self._docking_executable)
             )
             
-            success = result.returncode == 0
-            
-            # Manually write log file from stdout (some docking engines don't support --log)
-            if success or result.stdout:
+            output_exists = output_file.exists() and output_file.stat().st_size > 0
+            success = result.returncode == 0 and output_exists
+
+            # Manually write a diagnostic log because some docking engines do
+            # not support --log.  Keep stdout (which contains the affinity
+            # table) and stderr (which contains parse/runtime errors).
+            log_text = result.stdout or ""
+            if result.stderr:
+                if log_text and not log_text.endswith(("\n", "\r")):
+                    log_text += "\n"
+                log_text += "[stderr]\n" + result.stderr
+            if result.returncode == 0 and not output_exists:
+                if log_text and not log_text.endswith(("\n", "\r")):
+                    log_text += "\n"
+                log_text += (
+                    "[BFEE-Docking] Docking returned success but did not create "
+                    "a non-empty output PDBQT file.\n"
+                )
+            if log_text:
                 with open(log_file, 'w') as f:
-                    f.write(result.stdout)
-            
+                    f.write(log_text)
+
             return {
                 'ligand': ligand_pdbqt,
                 'output': output_file,

@@ -220,15 +220,23 @@ def get_obabel_executable() -> pathlib.Path:
     
     Returns:
         pathlib.Path: Absolute path to the obabel executable.
-                      Prefer obabel from the current environment, then fall
-                      back to third_party/obabel/obabel(.exe).
+                      Prefer the bundled executable (with its matching
+                      plugins/DLLs), then fall back to an executable on PATH.
     """
+    # Prefer the bundled executable when it is available.  The bundled
+    # executable is shipped together with its matching Open Babel plugins and
+    # DLLs; using an unrelated executable found on PATH can select a different
+    # plugin directory and produce non-reproducible conversions.
+    obabel_name = "obabel.exe" if os.name == 'nt' else "obabel"
+    bundled_obabel = _THIRD_PARTY_DIR / "obabel" / obabel_name
+    if bundled_obabel.exists():
+        return bundled_obabel
+
     system_obabel = shutil.which("obabel")
     if system_obabel:
         return pathlib.Path(system_obabel).resolve()
 
-    obabel_name = "obabel.exe" if os.name == 'nt' else "obabel"
-    return _THIRD_PARTY_DIR / "obabel" / obabel_name
+    return bundled_obabel
 
 
 def get_vmd_executable(vmd_path: str) -> pathlib.Path:

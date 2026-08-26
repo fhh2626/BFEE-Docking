@@ -79,12 +79,14 @@ class MainWindow(QMainWindow):
         msg_box.exec()
     
     def _show_warning(self, title: str, message: str):
-        """Show a warning message box with the application icon."""
+        """Show a warning message box with a single OK button."""
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(title)
         msg_box.setText(message)
         msg_box.setIcon(QMessageBox.Warning)
         msg_box.setWindowIcon(get_app_icon())
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.setDefaultButton(QMessageBox.Ok)
         msg_box.exec()
     
     def _show_error(self, title: str, message: str):

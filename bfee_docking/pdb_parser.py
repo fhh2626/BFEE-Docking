@@ -43,6 +43,24 @@ class PDBParser:
 
     _WATER_RESNAMES = {"HOH", "H2O", "WAT", "WT", "SOL", "TIP3", "TP3"}
 
+    # PDB element fields are case-sensitive for Open Babel/Vina atom typing.
+    # PDB2PQR may write a metal as element ``X`` when its output is rewritten
+    # through Bio.PDB, so use explicit symbols for the ion residue aliases
+    # supported by the protein-processing UI.
+    _METAL_ELEMENT_SYMBOLS = {
+        "LI": "Li", "NA": "Na", "NA1": "Na", "SOD": "Na",
+        "K": "K", "K1": "K", "POT": "K",
+        "RB": "Rb", "CS": "Cs",
+        "MG": "Mg", "MG2": "Mg", "CA": "Ca", "CA2": "Ca", "CAL": "Ca",
+        "SR": "Sr", "BA": "Ba",
+        "MN": "Mn", "MN2": "Mn", "FE": "Fe", "FE2": "Fe", "FE3": "Fe",
+        "CO": "Co", "NI": "Ni", "CU": "Cu", "CU1": "Cu", "CU2": "Cu",
+        "ZN": "Zn", "ZN2": "Zn", "CD": "Cd", "HG": "Hg",
+        "AL": "Al", "GA": "Ga", "IN": "In", "SN": "Sn", "PB": "Pb",
+        "BI": "Bi", "CR": "Cr", "MO": "Mo", "W": "W", "V": "V",
+        "CLA": "Cl", "CL": "Cl",
+    }
+
     def __init__(
         self,
         input_pdb: str,
@@ -58,6 +76,7 @@ class PDBParser:
         self._hetatm_selections: list[str] = []
         self._generated_pdbqt_file: pathlib.Path | None = None
         self._detected_pockets: list | None = None
+        self._pdbqt_generic_metal_warnings: list[str] = []
         
         # Get absolute path to obabel executable
         self._obabel_executable = third_party_tools.get_obabel_executable()
@@ -433,6 +452,203 @@ class PDBParser:
         
         return True
 
+    @classmethod
+    def _normalize_metal_element_fields(cls, pdb_path: pathlib.Path) -> int:
+        """Normalize metal element fields after PDB2PQR/Bio.PDB rewriting.
+
+        Bio.PDB cannot always infer an element from PQR records and may write
+        a preserved metal as ``X``.  Open Babel then emits an empty PDBQT atom
+        type, which makes smina reject the receptor before docking starts.
+        Restore the canonical, case-sensitive element symbol in columns 77-78
+        for known metal-ion HETATM records.
+        """
+        if not pdb_path.exists():
+            raise FileNotFoundError(f"PDB file not found: {pdb_path}")
+
+        lines = pdb_path.read_text(encoding="utf-8").splitlines()
+        normalized = 0
+        output_lines = []
+        for line in lines:
+            if line.startswith(("ATOM  ", "HETATM")) and len(line) >= 20:
+                resname = line[17:20].strip().upper()
+                symbol = cls._METAL_ELEMENT_SYMBOLS.get(resname)
+                if symbol:
+                    # PDB element symbols occupy columns 77-78 (0-based
+                    # slice 76:78).  Preserve all other fields verbatim.
+                    padded = line.ljust(78)
+                    new_line = padded[:76] + symbol.rjust(2) + padded[78:]
+                    if new_line != line:
+                        normalized += 1
+                    line = new_line
+            output_lines.append(line)
+
+        if normalized:
+            pdb_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+        return normalized
+
+    # AutoDock/smina atom types that this bundled engine can ingest.
+    # Dedicated metal names keep their native parameters; other known metals
+    # are remapped to the generic metal type ``M``. Unknown non-metal types
+    # are rejected instead of being silently rewritten.
+    _SMINA_NATIVE_METAL_TYPES = {"Mg", "Mn", "Zn", "Ca", "Fe"}
+    _SMINA_GENERIC_METAL_NAMES = {
+        "Cu", "Na", "K", "Hg", "Co", "Cd", "Ni", "Si", "U", "M",
+    }
+    _SMINA_NONMETAL_ATOM_TYPES = {
+        "H", "HD", "C", "A", "N", "NA", "O", "OA", "S", "SA",
+        "P", "F", "Cl", "Br", "I", "B", "Se",
+    }
+    _SMINA_GENERIC_METAL_TYPE = "M"
+
+    @classmethod
+    def _smina_accepted_atom_types(cls) -> set[str]:
+        return (
+            cls._SMINA_NONMETAL_ATOM_TYPES
+            | cls._SMINA_NATIVE_METAL_TYPES
+            | cls._SMINA_GENERIC_METAL_NAMES
+        )
+
+    @classmethod
+    def _smina_known_metal_elements(cls) -> dict[str, str]:
+        """Map uppercase element symbols onto canonical metal PDBQT types."""
+        metals = {
+            symbol.upper(): symbol
+            for symbol in cls._METAL_ELEMENT_SYMBOLS.values()
+            if symbol != "Cl"  # chloride uses the halogen type Cl, not metal M
+        }
+        for symbol in cls._SMINA_NATIVE_METAL_TYPES | cls._SMINA_GENERIC_METAL_NAMES:
+            metals.setdefault(symbol.upper(), symbol)
+        return metals
+
+    @classmethod
+    def _resolve_smina_atom_type(cls, atom_type: str) -> str:
+        """Return a smina-ingestible PDBQT type for a known atom.
+
+        ``NA`` stays nitrogen-acceptor; ``Na`` stays sodium.  Wrong-case metal
+        names such as ``MG`` are restored to ``Mg``.  Known metals that smina
+        does not parameterize are rewritten to generic ``M``.  Unknown
+        non-metal types raise ``ValueError``.
+        """
+        accepted = cls._smina_accepted_atom_types()
+        if atom_type in accepted:
+            return atom_type
+
+        accepted_by_upper: dict[str, list[str]] = {}
+        for candidate in accepted:
+            accepted_by_upper.setdefault(candidate.upper(), []).append(candidate)
+        upper = atom_type.upper()
+        unique_accepted = accepted_by_upper.get(upper, [])
+        if len(unique_accepted) == 1:
+            return unique_accepted[0]
+        if len(unique_accepted) > 1:
+            raise ValueError(
+                f"ambiguous AutoDock type {atom_type!r} matches "
+                f"{sorted(unique_accepted)}"
+            )
+
+        metal_symbol = cls._smina_known_metal_elements().get(upper)
+        if metal_symbol:
+            if metal_symbol in accepted:
+                return metal_symbol
+            return cls._SMINA_GENERIC_METAL_TYPE
+
+        raise ValueError(
+            f"unsupported AutoDock type {atom_type!r} is not a known metal"
+        )
+
+    @staticmethod
+    def _validate_pdbqt_atom_types(pdbqt_path: pathlib.Path) -> None:
+        """Raise a useful error if Open Babel produced a typeless atom."""
+        lines = pdbqt_path.read_text(encoding="utf-8").splitlines()
+        invalid = []
+        for line_number, line in enumerate(lines, start=1):
+            if line.startswith(("ATOM  ", "HETATM")):
+                atom_type = line[77:79].strip() if len(line) >= 79 else ""
+                if not atom_type:
+                    invalid.append(line_number)
+
+        if invalid:
+            preview = ", ".join(str(number) for number in invalid[:5])
+            suffix = "..." if len(invalid) > 5 else ""
+            raise RuntimeError(
+                f"Open Babel generated PDBQT atom(s) without an AutoDock type "
+                f"at line(s) {preview}{suffix}: {pdbqt_path}. "
+                "Check preserved ions/hetero atoms in the protein input."
+            )
+
+    @classmethod
+    def _remap_unsupported_smina_metal_types(
+        cls,
+        pdbqt_path: pathlib.Path,
+    ) -> list[str]:
+        """Normalize metal PDBQT types and reject unknown non-metal types.
+
+        Open Babel may emit canonical element symbols such as ``Al`` or wrong
+        case such as ``MG``.  Dedicated smina metals are case-corrected;
+        other known metals are remapped to generic ``M``.  Empty types and
+        unknown non-metal types remain errors.
+        """
+        if not pdbqt_path.exists():
+            raise FileNotFoundError(f"PDBQT file not found: {pdbqt_path}")
+
+        lines = pdbqt_path.read_text(encoding="utf-8").splitlines()
+        rewritten: list[str] = []
+        warnings: list[str] = []
+        case_fixes: list[str] = []
+        unknown: list[str] = []
+        changed = False
+
+        for line_number, line in enumerate(lines, start=1):
+            if line.startswith(("ATOM  ", "HETATM")):
+                padded = line.ljust(79)
+                atom_type = padded[77:79].strip()
+                if atom_type:
+                    atom_name = padded[12:16].strip() or "?"
+                    resname = padded[17:20].strip() or "?"
+                    chain = padded[21:22].strip() or "?"
+                    resid = padded[22:26].strip() or "?"
+                    location = (
+                        f"line {line_number}: {atom_name} {resname} "
+                        f"{chain} {resid}"
+                    )
+                    try:
+                        resolved = cls._resolve_smina_atom_type(atom_type)
+                    except ValueError as exc:
+                        unknown.append(f"{location} type {atom_type} ({exc})")
+                    else:
+                        if resolved != atom_type:
+                            new_line = (
+                                padded[:77]
+                                + resolved.ljust(2)
+                                + padded[79:]
+                            )
+                            detail = f"{location} type {atom_type} -> {resolved}"
+                            if resolved == cls._SMINA_GENERIC_METAL_TYPE:
+                                warnings.append(detail)
+                            else:
+                                case_fixes.append(detail)
+                            line = new_line
+                            changed = True
+            rewritten.append(line)
+
+        if unknown:
+            preview = "; ".join(unknown[:5])
+            suffix = "..." if len(unknown) > 5 else ""
+            raise RuntimeError(
+                "Open Babel generated PDBQT atom type(s) that smina cannot "
+                f"ingest and that are not known metals: {preview}{suffix}: "
+                f"{pdbqt_path}."
+            )
+
+        if changed:
+            pdbqt_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+        if case_fixes:
+            print(
+                "✓ Corrected "
+                f"{len(case_fixes)} metal PDBQT atom type case(s)"
+            )
+        return warnings
+
 
     def _add_hydrogens_with_ph(
         self, 
@@ -479,6 +695,9 @@ class PDBParser:
                 io = Bio.PDB.PDBIO()
                 io.set_structure(structure)
                 io.save(str(self._output_pdb))
+                normalized = self._normalize_metal_element_fields(self._output_pdb)
+                if normalized:
+                    print(f"✓ Normalized {normalized} preserved metal element field(s)")
         except RuntimeError as e:
             print(f"Error running pdb2pqr: {e}")
             raise
@@ -522,7 +741,22 @@ class PDBParser:
             print(f"Error running obabel: {e}")
             print(f"STDERR:\n{e.stderr}")
             raise
-        
+
+        if not output_pdbqt.exists() or output_pdbqt.stat().st_size == 0:
+            raise RuntimeError(
+                f"Open Babel produced an empty PDBQT file: {output_pdbqt}"
+            )
+        self._validate_pdbqt_atom_types(output_pdbqt)
+        self._pdbqt_generic_metal_warnings = (
+            self._remap_unsupported_smina_metal_types(output_pdbqt)
+        )
+        if self._pdbqt_generic_metal_warnings:
+            print(
+                "Warning: remapped "
+                f"{len(self._pdbqt_generic_metal_warnings)} smina-unsupported "
+                "metal atom type(s) to M"
+            )
+
         # Store the generated PDBQT file path
         self._generated_pdbqt_file = output_pdbqt
 
@@ -631,6 +865,10 @@ class PDBParser:
         
         self._convert_to_pdbqt()
         print("✓ Converted to PDBQT format")
+
+    def get_pdbqt_generic_metal_warnings(self) -> list[str]:
+        """Return metal PDBQT types remapped to generic ``M`` during conversion."""
+        return list(self._pdbqt_generic_metal_warnings)
 
     def set_blind_docking_range(self, margin: float | collections.abc.Sequence[float] = 0.0) -> None:
         """Calculate center and side lengths then store docking region with margin."""

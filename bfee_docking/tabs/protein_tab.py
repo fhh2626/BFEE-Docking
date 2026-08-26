@@ -473,6 +473,26 @@ class ProteinTab(QWidget):
                 )
 
             
+            metal_warnings = (
+                self.main_window._protein_parser.get_pdbqt_generic_metal_warnings()
+            )
+            if metal_warnings:
+                preview = "\n".join(metal_warnings[:8])
+                extra = ""
+                if len(metal_warnings) > 8:
+                    extra = f"\n... and {len(metal_warnings) - 8} more"
+                self.main_window._show_warning(
+                    "Warning",
+                    "Some preserved metal atoms use AutoDock types that this "
+                    "bundled smina build does not recognize.\n\n"
+                    "Only those known metals have been rewritten to the generic "
+                    "metal type M so docking can continue. This only guarantees "
+                    "that smina can parse the receptor; it does not add "
+                    "metal-specific scoring.\n\n"
+                    f"{preview}{extra}\n\n"
+                    "Click OK to continue."
+                )
+
             # Check if protein has chain identifiers, if not, add them automatically
             if not self.main_window._protein_parser.has_chain_identifiers():
                 self.main_window._show_warning("Warning", 
