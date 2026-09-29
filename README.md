@@ -63,5 +63,5 @@ For servers running MD simulations:
 
 ```bash
 pip install parmed mdanalysis
-pip install "openmm[cuda13]"
+pip install "openmm[cuda13]>=8.5"
 ```
