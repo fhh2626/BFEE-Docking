@@ -96,7 +96,8 @@ def setup_openmm_system(psf_path, params):
         nonbondedMethod=NoCutoff,
         constraints=HBonds,
         rigidWater=True,
-        implicitSolvent=OBC2
+        implicitSolvent=OBC2,
+        sasaMethod="ACE"  # Requires OpenMM >= 8.5.0; includes nonpolar solvation.
     )
     
     # Set up integrator (required for Simulation object, even if just analyzing)
