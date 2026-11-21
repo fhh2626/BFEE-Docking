@@ -378,9 +378,12 @@ def get_docking_subprocess_env(executable: str | pathlib.Path) -> dict[str, str]
     """
     Get subprocess environment overrides for bundled docking executables.
 
-    Bundled qvina binaries ship with same-directory DLL/SO dependencies. When
-    such a binary is used, expose its directory to the platform dynamic loader.
+    Windows QVina binaries use the DLLs next to the executable. The bundled
+    Linux binaries are statically linked and need no loader override.
     """
+    if os.name != 'nt':
+        return None
+
     executable_path = pathlib.Path(executable)
     qvina_dir = _THIRD_PARTY_DIR / "qvina"
 
@@ -395,18 +398,8 @@ def get_docking_subprocess_env(executable: str | pathlib.Path) -> dict[str, str]
 
     env = os.environ.copy()
     qvina_dir_str = str(resolved_qvina_dir)
-
-    if os.name == 'nt':
-        current_path = env.get("PATH", "")
-        env["PATH"] = qvina_dir_str if not current_path else f"{qvina_dir_str}{os.pathsep}{current_path}"
-    else:
-        current_ld_library_path = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = (
-            qvina_dir_str
-            if not current_ld_library_path
-            else f"{qvina_dir_str}{os.pathsep}{current_ld_library_path}"
-        )
-
+    current_path = env.get("PATH", "")
+    env["PATH"] = qvina_dir_str if not current_path else f"{qvina_dir_str}{os.pathsep}{current_path}"
     return env
 
 

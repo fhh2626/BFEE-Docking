@@ -43,7 +43,7 @@ Their source code corresponding to the bundled version:
 - OpenBabel 3.1.1: https://github.com/openbabel/openbabel/releases/tag/openbabel-3-1-1
 - smina 2020.12.10: https://github.com/jaimergp/smina/releases/tag/2020.12.10
 - AutoDock Vina 1.2.7: https://github.com/ccsb-scripps/AutoDock-Vina/releases/tag/v1.2.7
-- QuickVina-W/2: https://github.com/QVina/qvina
+- QuickVina-W/2 and classic AutoDock Vina 1.1.2: https://github.com/QVina/qvina/tree/f4bb3b1073a0d50bb2f1fdd14d38594f937602ee
 - DSDP-redocking: https://github.com/PKUGaoGroup/DSDP
 - pocketeer: https://github.com/cch1999/pocketeer
 

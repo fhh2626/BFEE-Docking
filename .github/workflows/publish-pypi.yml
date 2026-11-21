@@ -78,6 +78,12 @@ jobs:
       - name: Build Linux wheel
         run: bash scripts/build_linux_wheel.sh
 
+      - name: Smoke test Linux wheel on glibc 2.17
+        run: |
+          docker run --rm --network none -v "$PWD:/io:ro" --workdir /io \
+            quay.io/pypa/manylinux2014_x86_64@sha256:8a79ff36ce155d8f242dc8013d73c5e8bbe937defb15de7d7afb342c1ab537f4 \
+            /opt/python/cp310-cp310/bin/python scripts/check_linux_wheel.py dist/linux/*.whl
+
       - uses: actions/upload-artifact@v4
         with:
           name: pypi-wheel-linux-${{ env.BFEE_DOCKING_BUILD_NUMBER }}

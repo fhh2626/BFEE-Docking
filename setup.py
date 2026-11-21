@@ -2,6 +2,7 @@ import os
 import re
 
 from setuptools import setup
+from setuptools.command.install import install as _install
 
 
 try:
@@ -36,6 +37,15 @@ if _bdist_wheel is not None:
             return super().get_tag()
 
 
-    setup(cmdclass={"bdist_wheel": bdist_wheel})
+    class install(_install):
+        def finalize_options(self):
+            tag = os.environ.get("BFEE_DOCKING_PLATFORM_TAG", "")
+            if tag.startswith(("linux_", "manylinux")) and self.install_lib is None:
+                # The platform wheel has bundled ELF files but no Python extension.
+                self.install_lib = self.install_platlib
+            super().finalize_options()
+
+
+    setup(cmdclass={"bdist_wheel": bdist_wheel, "install": install})
 else:
     setup()
