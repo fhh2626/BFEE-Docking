@@ -21,6 +21,12 @@ Main features:
 - Support for MM-GBSA calculations
 - Connection to BFEE3 for absolute binding free-energy calculations
 
+## Citation
+
+If you use BFEE-Docking in your research, please cite the following article.
+
+Sun, X., Li, Z., Shao, X., Cai, W., Li, Z., and Fu, H. “BFEE-Docking: A User-Friendly and Customizable End-to-End Tool from High-Throughput Virtual Screening to Binding Free-Energy Calculations.” *Journal of Chemical Theory and Computation* **2026**, *22*, 6976–6985. [doi:10.1021/acs.jctc.6c00830](https://doi.org/10.1021/acs.jctc.6c00830).
+
 ## License
 
 - Main code: GPL-3.0 or later
