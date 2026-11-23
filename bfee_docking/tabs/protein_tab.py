@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QRadioButton, QGroupBox, QDoubleSpinBox, QComboBox, QCheckBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 
 from .. import pdb_parser
 from ..gui_utils import get_app_icon
@@ -177,8 +177,8 @@ class ProteinTab(QWidget):
         first_row_layout.addWidget(self._radio_from_ligand)
         first_row_layout.addWidget(self._radio_specify_manually)
         
-        # Margin
-        first_row_layout.addWidget(QLabel("Margin:"))
+        # Box expansion
+        first_row_layout.addWidget(QLabel("Box expansion (Å)"))
         self._margin_spinbox = QDoubleSpinBox()
         self._margin_spinbox.setRange(0.0, 100.0)
         self._margin_spinbox.setValue(6.0)
@@ -850,6 +850,35 @@ class ProteinTab(QWidget):
         except Exception as e:
             print(f"Warning: Could not update docking range with margin {margin}: {e}")
 
+    def apply_manual_docking_box(self, center, size):
+        """Apply a box from Results without triggering the radio button's dialog."""
+        parser = self.main_window._protein_parser
+        if parser is None:
+            raise RuntimeError("Please process the protein first.")
+
+        previous_box = parser.get_generated_docking_range()
+        box_changed = previous_box is None or any(
+            tuple(previous) != tuple(current)
+            for previous, current in zip(previous_box, (center, size))
+        )
+        parser.set_custom_docking_range(center=center, side_length=size)
+        fields = (
+            self._center_x_input, self._center_y_input, self._center_z_input,
+            self._length_x_input, self._length_y_input, self._length_z_input,
+        )
+        for field, value in zip(fields, (*center, *size)):
+            field.setText(f"{value:.4f}".rstrip("0").rstrip("."))
+        with QSignalBlocker(self._radio_specify_manually):
+            self._radio_specify_manually.setChecked(True)
+        self._toggle_docking_region()
+
+        if box_changed:
+            self._flex_result_input.clear()
+            self._flex_result_input.setPlaceholderText(
+                "Docking box changed. Detect flexible residues again if needed."
+            )
+            self.main_window._docking_tab.mark_flexible_residues_for_review()
+
     def _on_manual_range_changed(self):
         """Handle manual center/length value changes."""
         # Only update if "Specify Manually" mode is active
@@ -909,6 +938,7 @@ class ProteinTab(QWidget):
             result_str = ",".join(residues)
             
             # Display in result input field
+            self._flex_result_input.setPlaceholderText("Detected residues will appear here...")
             self._flex_result_input.setText(result_str)
             
             print(f"✓ Detected {len(residues)} flexible residues within selected docking region")

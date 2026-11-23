@@ -2,7 +2,7 @@ import pathlib
 import traceback
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QGroupBox, QDoubleSpinBox, QComboBox, QProgressBar, QFileDialog
+    QGroupBox, QDoubleSpinBox, QComboBox, QProgressBar, QFileDialog, QMessageBox
 )
 from PySide6.QtCore import QThread, Signal
 
@@ -41,6 +41,7 @@ class DockingTab(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.main_window = main_window
+        self._flexible_residues_need_review = False
         self._setup_ui()
         
     def _setup_ui(self):
@@ -102,6 +103,7 @@ class DockingTab(QWidget):
         self._flexible_residues_input = QLineEdit()
         self._flexible_residues_input.setPlaceholderText("e.g. A:45,A:82,B:120")
         self._flexible_residues_input.setMaximumWidth(180)
+        self._flexible_residues_input.textChanged.connect(self._clear_flexible_residue_review)
         row2_layout.addWidget(self._flexible_residues_input)
         
         row2_layout.addStretch()
@@ -178,7 +180,7 @@ class DockingTab(QWidget):
             
         # Only enable "Load Results (No Run)" button when engine is DSDP or gnina
         if engine_name in ["DSDP", "gnina"]:
-            self._load_results_btn.setEnabled(True)
+            self._load_results_btn.setEnabled(self.main_window._docking_worker is None)
             if engine_name == "DSDP":
                 self._exhaustiveness_input.setText("384")
             else:
@@ -192,8 +194,19 @@ class DockingTab(QWidget):
         else:
             self._cnn_mode_combo.setEnabled(False)
             
+    def mark_flexible_residues_for_review(self):
+        if self._flexible_residues_input.text().strip():
+            self._flexible_residues_need_review = True
+            self._flexible_residues_input.setToolTip("Verify these residues for the new redocking box.")
+
+    def _clear_flexible_residue_review(self):
+        self._flexible_residues_need_review = False
+        self._flexible_residues_input.setToolTip("")
+
     def start_docking(self):
         """Start the molecular docking process."""
+        if self.main_window._docking_worker is not None:
+            return
         try:
             # Validate output directory
             if not self.main_window._output_directory:
@@ -250,6 +263,16 @@ class DockingTab(QWidget):
             flexible_residues = ""
             if engine in ["smina", "gnina"]:
                 flexible_residues = self._flexible_residues_input.text().strip()
+                if flexible_residues and self._flexible_residues_need_review:
+                    answer = QMessageBox.question(
+                        self, "Review flexible residues",
+                        f"The redocking box changed. Use these flexible residues for the new box?\n\n{flexible_residues}",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+                    )
+                    if answer != QMessageBox.Yes:
+                        self._flexible_residues_input.setFocus()
+                        return
+                    self._clear_flexible_residue_review()
             
             # Get CNN scoring mode (only for gnina)
             cnn_scoring = "rescore"  # Default
@@ -263,7 +286,7 @@ class DockingTab(QWidget):
             
             # Create Docking object
             print("Creating Docking object...")
-            self.main_window._docking_instance = docking.Docking(
+            candidate = docking.Docking(
                 protein_pdbqt=str(protein_pdbqt),
                 ligand_pdbqts=[str(p) for p in self.main_window._ligand_pdbqt_files],
                 ligand_smiles=self.main_window._ligand_smiles_list,
@@ -278,7 +301,7 @@ class DockingTab(QWidget):
                 cnn_scoring=cnn_scoring
             )
             
-            print(f"✓ Docking object created")
+            print("Docking object created")
             print(f"  Protein: {protein_pdbqt}")
             print(f"  Ligands: {len(self.main_window._ligand_pdbqt_files)}")
             print(f"  Exhaustiveness: {exhaustiveness}")
@@ -294,7 +317,7 @@ class DockingTab(QWidget):
             
             # Special handling for DSDP engine
             if engine == "DSDP":
-                job_path = self.main_window._docking_instance.generate_dsdp_job_package()
+                job_path = candidate.generate_dsdp_job_package()
                 self.main_window._show_info(
                     "DSDP Job Generated",
                     f"Job package generated at:\n{job_path}\n\n"
@@ -307,7 +330,7 @@ class DockingTab(QWidget):
 
             # Special handling for gnina engine
             if engine == "gnina":
-                job_path = self.main_window._docking_instance.generate_gnina_job_package()
+                job_path = candidate.generate_gnina_job_package()
                 self.main_window._show_info(
                     "Gnina Job Generated",
                     f"Job package generated at:\n{job_path}\n\n"
@@ -324,16 +347,20 @@ class DockingTab(QWidget):
             self._docking_progress.setValue(0)
             self._docking_progress.setFormat(f"0% (0/{total_ligands} ligands)")
             
-            # Disable Start Docking button during docking
+            # Local runs can overwrite the previous output files.
+            worker = DockingWorker(candidate)
+            worker.progress_updated.connect(self._on_docking_progress)
+            worker.docking_finished.connect(self._on_docking_finished)
+            worker.docking_error.connect(self._on_docking_error)
+            worker.finished.connect(self._on_local_worker_stopped)
+            worker.finished.connect(worker.deleteLater)
+            self.main_window._docking_worker = worker
+            self.main_window._docking_instance = candidate
             self._start_docking_btn.setEnabled(False)
-            
-            # Create and configure worker thread
+            self._load_results_btn.setEnabled(False)
+            self.main_window._results_tab.update_results_table()
             print("\nStarting docking process...")
-            self.main_window._docking_worker = DockingWorker(self.main_window._docking_instance)
-            self.main_window._docking_worker.progress_updated.connect(self._on_docking_progress)
-            self.main_window._docking_worker.docking_finished.connect(self._on_docking_finished)
-            self.main_window._docking_worker.docking_error.connect(self._on_docking_error)
-            self.main_window._docking_worker.start()
+            worker.start()
         
         except Exception as e:
             self.main_window._show_error("Error", f"Error setting up docking:\n{str(e)}")
@@ -346,13 +373,15 @@ class DockingTab(QWidget):
         self._docking_progress.setFormat(f"{percentage}% ({current}/{total} ligands)")
         print(f"Progress: {current}/{total} ligands ({percentage}%)")
     
-    def _on_docking_finished(self, results):
-        """Handle docking completion."""
-        print(f"✓ Docking completed!")
-        
-        # Re-enable Start Docking button
+    def _on_local_worker_stopped(self):
+        self.main_window._docking_worker = None
         self._start_docking_btn.setEnabled(True)
-        
+        self._load_results_btn.setEnabled(self._engine_combo.currentText() in ("DSDP", "gnina"))
+
+    def _on_docking_finished(self, results, result_dir=None):
+        """Handle docking completion or a successful server import."""
+        print("Docking results are ready.")
+
         # Update results table - delegating to ResultsTab
         if hasattr(self.main_window, '_results_tab'):
              self.main_window._results_tab.update_results_table()
@@ -360,7 +389,8 @@ class DockingTab(QWidget):
         # Count successful docking results and report failures explicitly.
         successful_docks = len([r for r in results if r.get('success', False)])
         failed_docks = [r for r in results if not r.get('success', False)]
-        result_dir = pathlib.Path(self.main_window._output_directory) / 'result'
+        if result_dir is None:
+            result_dir = pathlib.Path(self.main_window._output_directory) / 'result'
 
         if failed_docks:
             failure_lines = []
@@ -398,14 +428,12 @@ class DockingTab(QWidget):
     def _on_docking_error(self, error_msg):
         """Handle docking errors."""
         print(f"Error during docking: {error_msg}")
-        
-        # Re-enable Start Docking button
-        self._start_docking_btn.setEnabled(True)
-        
         self.main_window._show_error("Error", f"Error during docking:\n{error_msg}")
 
     def load_results(self):
         """Load docking results from an existing run (e.g. DSDP from Linux)."""
+        if self.main_window._docking_worker is not None:
+            return
         try:
              # Validate prerequisites matching start_docking
             if not self.main_window._protein_parser or not self.main_window._ligand_pdbqt_files:
@@ -467,7 +495,7 @@ class DockingTab(QWidget):
                 if flexible_residues and engine not in ["smina", "gnina"]:
                     engine = "smina"  # Use smina for flexible residue support
                 
-                self.main_window._docking_instance = docking.Docking(
+                loaded_docking = docking.Docking(
                     protein_pdbqt=str(protein_pdbqt),
                     ligand_pdbqts=[str(p) for p in self.main_window._ligand_pdbqt_files],
                     ligand_smiles=self.main_window._ligand_smiles_list,
@@ -482,11 +510,17 @@ class DockingTab(QWidget):
                     cnn_scoring=cnn_scoring
                 )
                 
-                # Load results
-                results = self.main_window._docking_instance.load_dsdp_results(result_dir)
-                
-                # Update UI
-                self._on_docking_finished(results)
+                # Keep the current results if loading fails.
+                results = loaded_docking.load_dsdp_results(result_dir)
+                if not any(loaded_docking.get_affinity_values()):
+                    self.main_window._show_warning(
+                        "No docking poses loaded",
+                        f"No usable results were found for the current ligands in:\n{result_dir}\n\n"
+                        "Check that the folder contains the matching index and completed docking files.",
+                    )
+                    return
+                self.main_window._docking_instance = loaded_docking
+                self._on_docking_finished(results, result_dir)
                 
             except Exception as e:
                 self.main_window._show_error("Error", f"Failed to load results:\n{str(e)}")

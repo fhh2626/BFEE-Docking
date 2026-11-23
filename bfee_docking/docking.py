@@ -4,6 +4,7 @@
 # Standard library imports
 import collections.abc
 import csv
+import math
 import pathlib
 import subprocess
 
@@ -542,19 +543,24 @@ class Docking:
         if table_start_idx == -1:
             return []
             
-        for line in lines[table_start_idx + 2:]:
-            line = line.strip()
-            if not line or line.startswith('===') or line.startswith('---'):
-                continue
-            
+        for line in lines[table_start_idx + 1:]:
             parts = line.split()
-            if len(parts) >= 2:
-                try:
-                    affinity_values.append(float(parts[1]))
-                except ValueError:
-                    continue
-            else:
+            if not parts:
+                continue
+            if len(parts) < 2 or not parts[0].isascii() or not parts[0].isdecimal():
+                if affinity_values:
+                    break
+                continue
+            # Keep the score list aligned with the consecutive pose numbers.
+            if int(parts[0]) != len(affinity_values) + 1:
                 break
+            try:
+                affinity = float(parts[1])
+            except ValueError:
+                break
+            if not math.isfinite(affinity):
+                break
+            affinity_values.append(affinity)
         
         return affinity_values
 
@@ -566,10 +572,11 @@ class Docking:
             parts = line.strip().split()
             if len(parts) >= 2 and parts[0].endswith('.pdbqt'):
                 try:
-                    # Second column is affinity
-                    affinity_values.append(float(parts[1]))
+                    affinity = float(parts[1])
                 except ValueError:
                     continue
+                if math.isfinite(affinity):
+                    affinity_values.append(affinity)
         
         return affinity_values
 
@@ -734,19 +741,7 @@ class Docking:
         # Use shared parsing function to get ATOM lines
         atom_lines = self._parse_pdbqt_model_atoms(output_pdbqt, pose_index)
         
-        # Parse coordinates from ATOM/HETATM lines
-        # PDB/PDBQT format: columns 31-38 (x), 39-46 (y), 47-54 (z)
-        coordinates = []
-        for line in atom_lines:
-            if line.startswith(('ATOM', 'HETATM')) and len(line) >= 54:
-                try:
-                    x = float(line[30:38].strip())
-                    y = float(line[38:46].strip())
-                    z = float(line[46:54].strip())
-                    coordinates.append([x, y, z])
-                except ValueError:
-                    continue
-        
+        coordinates = self._pdbqt_coordinates(atom_lines)
         # Check if we have valid positions
         if len(coordinates) == 0:
             raise ValueError(
@@ -774,6 +769,19 @@ class Docking:
         ]
         
         return center, length
+
+    @staticmethod
+    def _pdbqt_coordinates(atom_lines):
+        coordinates = []
+        for line in atom_lines:
+            if line.startswith(('ATOM', 'HETATM')) and len(line) >= 54:
+                try:
+                    xyz = [float(line[start:start + 8]) for start in (30, 38, 46)]
+                except ValueError:
+                    continue
+                if all(math.isfinite(value) for value in xyz):
+                    coordinates.append(xyz)
+        return coordinates
 
     def _create_protein_without_flex_residues(self, output_path: pathlib.Path) -> pathlib.Path:
         """
@@ -1226,48 +1234,29 @@ class Docking:
         else:
             print("No docking_config.json found, using defaults")
             
-        # Read index to map filenames to original context
-        # We store multiple keys to help matching: 
-        # 1. Full original path (normalized)
-        # 2. Filename only
-        index_map_path = {} 
+        # A copied job can contain paths from another operating system. Match
+        # by path and SMILES first, then accept only an unambiguous name match.
+        index_map_path = {}
         index_map_name = {}
-        
-        with open(index_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Normalize path for better matching
-                orig_path_str = str(pathlib.Path(row["OriginalPath"])).lower().replace('\\', '/')
-                entry_data = {
-                    "safe_filename": row["Filename"],
-                    "smiles": row["SMILES"]
-                }
-                index_map_path[orig_path_str] = entry_data
-                
-                # Also map by just the filename for fallback
-                orig_name = pathlib.Path(row["OriginalPath"]).name
-                index_map_name[orig_name] = entry_data
+        with open(index_path, "r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                original = row["OriginalPath"].replace('\\', '/')
+                name = original.rsplit('/', 1)[-1]
+                smiles = row["SMILES"].strip()
+                index_map_path.setdefault((original, smiles), []).append(row["Filename"])
+                index_map_name.setdefault((name, smiles), []).append(row["Filename"])
 
-        print(f"Index loaded with {len(index_map_path)} entries.")
+        print(f"Index loaded with {sum(map(len, index_map_path.values()))} entries.")
         
         loaded_results = []
         affinity_results = []
         
         # We iterate over the ligands currently configured in this Docking instance
-        for ligand_path in self._ligand_pdbqts:
-            # Prepare lookup keys
-            ligand_path_str = str(ligand_path).lower().replace('\\', '/')
-            ligand_name = ligand_path.name
-            
-            # Try exact path match first, then filename match
-            entry = index_map_path.get(ligand_path_str)
-            if not entry:
-                entry = index_map_name.get(ligand_name)
-                if entry:
-                    print(f"Match found by filename for {ligand_name}")
-                else:
-                    print(f"Warning: No index entry found for {ligand_name} (path: {ligand_path})")
-            
+        for ligand_path, smiles in zip(self._ligand_pdbqts, self._ligand_smiles):
+            ligand_path_str = ligand_path.as_posix()
+            smiles = smiles.strip()
+            matches = index_map_path.get((ligand_path_str, smiles)) or index_map_name.get((ligand_path.name, smiles), [])
+
             result_data = {
                 'ligand': ligand_path,
                 'output': None,
@@ -1279,8 +1268,8 @@ class Docking:
             
             affinities = []
             
-            if entry:
-                safe_filename = entry["safe_filename"]
+            if len(matches) == 1:
+                safe_filename = matches[0]
                 # safe_filename usually looks like "ligand_0001_name.pdbqt"
                 # We need to construct the output filenames carefully
                 stem = pathlib.Path(safe_filename).stem
@@ -1293,51 +1282,51 @@ class Docking:
                     result_dir / out_pdbqt_name
                 ]
                 
-                found_out = None
-                for loc in file_locs:
-                    if loc.exists():
-                        found_out = loc
-                        break
+                found_out = next((loc for loc in file_locs if loc.is_file()), None)
                         
                 log_locs = [
                     result_dir / "results" / out_log_name,
                     result_dir / out_log_name
                 ]
                 
-                found_log = None
-                for loc in log_locs:
-                    if loc.exists():
-                        found_log = loc
-                        break
-                
+                found_log = next((loc for loc in log_locs if loc.is_file()), None)
+
                 if found_out and found_log:
                     result_data['output'] = found_out
                     result_data['log'] = found_log
-                    result_data['success'] = True
                     affinities = self._parse_affinity_from_log(found_log)
                     if not affinities:
-                         print(f"Warning: Log found for {ligand_name} but no affinities parsed. path: {found_log}")
-                    
-                    # Check for flexible residues output
-                    out_flex_name = f"{stem}_out_flex_res.pdbqt"
-                    flex_locs = [
-                        result_dir / "results" / out_flex_name,
-                        result_dir / out_flex_name
-                    ]
-                    
-                    found_flex = None
-                    for loc in flex_locs:
-                        if loc.exists():
-                            found_flex = loc
-                            break
-                    
-                    if found_flex:
-                        result_data['type'] = 'flexible'
-                        result_data['flexible_residue_output'] = found_flex
-                        print(f"Found flexible residues for {ligand_name}")
+                        result_data['error'] = f"No docking scores found in {found_log.name}."
+                    else:
+                        try:
+                            atoms = self._parse_pdbqt_model_atoms(found_out, 0)
+                            if self._pdbqt_coordinates(atoms):
+                                result_data['success'] = True
+                            else:
+                                result_data['error'] = f"No valid pose coordinates in {found_out.name}."
+                        except (OSError, UnicodeError) as e:
+                            result_data['error'] = f"Could not read {found_out.name}: {e}"
+                    if not result_data['success']:
+                        affinities = []
+
+                    # Keep flexible residues only for a usable ligand result.
+                    if result_data['success']:
+                        out_flex_name = f"{stem}_out_flex_res.pdbqt"
+                        flex_locs = (
+                            result_dir / "results" / out_flex_name,
+                            result_dir / out_flex_name,
+                        )
+                        found_flex = next((loc for loc in flex_locs if loc.is_file()), None)
+                        if found_flex:
+                            result_data['type'] = 'flexible'
+                            result_data['flexible_residue_output'] = found_flex
                 else:
-                    print(f"Warning: Output/Log file missing for {ligand_name}. Expected at {result_dir / 'results' / out_log_name}")
-            
+                    result_data['error'] = f"Missing output PDBQT or log for {safe_filename}."
+            elif matches:
+                result_data['error'] = "Multiple matching ligands in index.csv."
+            else:
+                result_data['error'] = "No matching ligand path or filename and SMILES in index.csv."
+
             loaded_results.append(result_data)
             affinity_results.append(affinities)
             
