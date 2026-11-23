@@ -3,7 +3,7 @@ import traceback
 import shutil
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QGroupBox, QDoubleSpinBox, QComboBox, QApplication, QFileDialog, QInputDialog
+    QGroupBox, QDoubleSpinBox, QComboBox, QFileDialog, QInputDialog
 )
 
 from .. import md_prepper
@@ -40,8 +40,19 @@ class MDPrepperTab(QWidget):
         vmd_path_layout.addWidget(browse_vmd_btn)
         
         pdb_prep_layout.addLayout(vmd_path_layout)
-        
-        # Second row: pH and Process buttons
+
+        cgenff_layout = QHBoxLayout()
+        cgenff_layout.addWidget(QLabel("CGenFF 5.0 directory:"))
+        self._cgenff_dir_edit = QLineEdit(self.main_window._cgenff_dir)
+        self._cgenff_dir_edit.setPlaceholderText("Select the local CGenFF 5.0 force-field directory...")
+        self._cgenff_dir_edit.editingFinished.connect(self._save_cgenff_dir)
+        cgenff_layout.addWidget(self._cgenff_dir_edit)
+        browse_cgenff_btn = QPushButton("Browse")
+        browse_cgenff_btn.clicked.connect(self._browse_cgenff_dir)
+        cgenff_layout.addWidget(browse_cgenff_btn)
+        pdb_prep_layout.addLayout(cgenff_layout)
+
+        # pH and Process buttons
         process_layout = QHBoxLayout()
         
         process_layout.addWidget(QLabel("pH:"))
@@ -75,6 +86,7 @@ class MDPrepperTab(QWidget):
         str_file_layout.addWidget(QLabel("Ligand str File:"))
         
         self._ligand_str_edit = QLineEdit()
+        self._ligand_str_edit.setToolTip("Filled by Process Ligand. You can replace it with your own CHARMM .str or .top file.")
         str_file_layout.addWidget(self._ligand_str_edit)
         
         browse_str_btn = QPushButton("Browse")
@@ -213,6 +225,22 @@ class MDPrepperTab(QWidget):
             self.main_window._vmd_path = path
             self.main_window._save_settings()
 
+    def _save_cgenff_dir(self):
+        directory = self._cgenff_dir_edit.text().strip()
+        if directory != self.main_window._cgenff_dir:
+            self.main_window._cgenff_dir = directory
+            self.main_window._save_settings()
+
+    def _browse_cgenff_dir(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select CGenFF 5.0 Force-Field Directory",
+            self._cgenff_dir_edit.text().strip() or self.main_window._last_dir,
+        )
+        if directory:
+            self._cgenff_dir_edit.setText(directory)
+            self.main_window._last_dir = directory
+            self._save_cgenff_dir()
+
     def _md_process_protein(self):
         """Process protein using MDPrepper."""
         # Validate output directory
@@ -274,7 +302,7 @@ class MDPrepperTab(QWidget):
             traceback.print_exc()
 
     def _md_process_ligand(self):
-        """Process ligand using MDPrepper (generate MOL2)."""
+        """Process ligand and prefill the generated CHARMM stream path."""
         # Validate output directory
         if not self.main_window._output_directory and not self.main_window._output_dir_input.text():
             self.main_window._show_warning("Error", "Please select an output directory first.")
@@ -282,12 +310,7 @@ class MDPrepperTab(QWidget):
             
         output_dir = pathlib.Path(self.main_window._output_directory if self.main_window._output_directory else self.main_window._output_dir_input.text()).resolve()
         
-        # Validate VMD path
-        if not self.main_window._vmd_path:
-            self.main_window._show_warning("Error", "Please select VMD executable path.")
-            return
-            
-        # Check source files
+        # This step uses RDKit and AutoCGENFF, not VMD.
         md_prepper_dir = output_dir / "md_prepper"
         ligand_pdb_path = md_prepper_dir / "ligand.pdb"
         ligand_smi_path = md_prepper_dir / "ligand.smi"
@@ -318,25 +341,24 @@ class MDPrepperTab(QWidget):
                 ligand_smiles=smiles,
                 ph=self._md_ph_spinbox.value(),
                 output_dir=str(output_dir),
-                vmd_path=self.main_window._vmd_path
+                vmd_path=None,
             )
             
-            # Run processing
-            mol2_path = prepper.process_ligand()
-            
-            self.main_window._show_info("Success", f"Ligand processed successfully!\nOutput: {mol2_path}")
+            str_path = prepper.process_ligand(cgenff_dir=self._cgenff_dir_edit.text().strip())
+            self._ligand_str_edit.setText(str_path)
+            self.main_window._show_info("Success", f"Ligand processed successfully!\nCHARMM stream: {str_path}")
             
         except Exception as e:
             self.main_window._show_error("Error", f"Error processing ligand:\n{str(e)}")
             traceback.print_exc()
 
     def _browse_ligand_str_file(self):
-        """Browse for Ligand STR file."""
+        """Browse for a manually supplied CHARMM ligand topology or stream."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Ligand STR File",
+            "Select CHARMM Ligand Topology or Stream",
             self.main_window._last_dir,
-            "Stream Files (*.str);;All Files (*.*)"
+            "CHARMM Ligand Files (*.str *.top);;All Files (*.*)"
         )
         
         if file_path:
@@ -378,8 +400,22 @@ class MDPrepperTab(QWidget):
              self.main_window._show_warning("Error", f"Ligand PDB not found at:\n{ligand_pdb_path}\nPlease run 'Process Ligand' first.")
              return
 
+        # The export and prepared pose can share a directory across many runs.
+        exported_pose = md_prepper_dir / "ligand.pdb"
+        exported_smiles = md_prepper_dir / "ligand.smi"
+        prepared_smiles = fixed_files_dir / "ligand_input.smi"
+        if ((exported_pose.is_file() and exported_pose.read_bytes() != ligand_pdb_path.read_bytes())
+                or (exported_smiles.is_file() and (not prepared_smiles.is_file()
+                    or exported_smiles.read_text(encoding="utf-8").strip()
+                    != prepared_smiles.read_text(encoding="utf-8").strip()))):
+            self.main_window._show_warning("Error", "The exported ligand has changed. Run Process Ligand again before building the system.")
+            return
+
         # 2. Get parameters from GUI
         ligand_str_path = self._ligand_str_edit.text().strip()
+        if not ligand_str_path:
+            self.main_window._show_warning("Error", "Select a CHARMM ligand .str or .top file first, or run Process Ligand to generate one.")
+            return
         padding = self._water_edge_spin.value()
         salt_type = self._ion_type_combo.currentText()
         salt_concentration = self._ion_concentration_spin.value()
@@ -401,11 +437,6 @@ class MDPrepperTab(QWidget):
                 vmd_path=self.main_window._vmd_path
             )
 
-            # 4. Call generate_system_psf
-            self.main_window._show_info("Processing", "Generating System PSF... This may take a moment.")
-            # Force UI update?
-            QApplication.processEvents()
-
             ionized_psf, ionized_pdb = prepper.generate_system_psf(
                 protein_pdb_path=str(protein_pdb_path),
                 ligand_pdb_path=str(ligand_pdb_path),
@@ -414,36 +445,11 @@ class MDPrepperTab(QWidget):
                 salt_type=salt_type,
                 salt_concentration=salt_concentration,
                 temp_output_path=str(temp_files_dir),
-                output_path=str(md_files_dir)
+                output_path=str(md_files_dir),
+                cgenff_dir=self._cgenff_dir_edit.text().strip(),
             )
 
-            # 5. Copy extra files
-            third_party_dir = md_prepper.third_party_tools.get_third_party_dir()
-            force_field_dir = third_party_dir / "force_field"
-            
-            files_to_copy = [
-                "par_all36m_prot.prm",
-                "par_all36_cgenff.prm",
-                "toppar_water_ions.str"
-            ]
-            
-            for file_name in files_to_copy:
-                src = force_field_dir / file_name
-                dst = md_files_dir / file_name
-                if src.exists():
-                    shutil.copy(src, dst)
-                    print(f"Copied {file_name} to {md_files_dir}")
-                else:
-                    print(f"Warning: Force field file not found: {src}")
-
-            # Copy ligand.str if it exists in temp_files
-            ligand_str_src = (temp_files_dir / "ligand.str").resolve()
-            if ligand_str_src.exists():
-                target_str = (md_files_dir / "ligand.str").resolve()
-                shutil.copy(ligand_str_src, target_str)
-                print(f"Copied ligand.str to {md_files_dir}")
-
-            # 6. Success message
+            # The backend publishes the new system and matching force-field files together.
             self.main_window._show_info("Success", 
                 f"System PSF generated successfully!\n\n"
                 f"Output Files located in:\n{md_files_dir}\n"

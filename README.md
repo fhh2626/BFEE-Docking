@@ -55,9 +55,19 @@ Their source code corresponding to the bundled version:
 
 ## Installation and Usage
 
+BFEE-Docking requires Python 3.11 or later.
+
 ```bash
 pip install bfee-docking
 ```
+
+### Ligand preparation for MD
+
+In the **MD Prepper** tab, select the local **CGenFF 5.0 directory** once. It must contain `top_all36_cgenff.rtf`, `par_all36_cgenff.prm`, and `par_all36_cgenff_increments.prm` from the same CGenFF 5.0 release. These data files are separate from the [AutoCGENFF](https://github.com/fhh2626/AutoCGENFF) Python package.
+
+After exporting a docking pose, click **Process Ligand**. BFEE-Docking prepares the ligand PDB and MOL2, runs AutoCGENFF locally, and fills **Ligand str File** with the absolute path to `md_prepper/fixed_files/ligand.str`. Review the assigned parameters before running simulations. You can edit the path or browse to a custom CHARMM `.str` or `.top` file. Generate PSF uses the file currently selected in the input box. A GROMACS `.top` file is not a CHARMM topology and cannot be used there.
+
+### Optional tools for docking and simulation
 
 For servers running GPU-based docking, unzip `third_party/DSDP_redocking.zip` and enter the DSDP folder. Then type:
 

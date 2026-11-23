@@ -7,11 +7,12 @@ name = "bfee-docking"
 dynamic = ["version"]
 description = "GUI workflow for BFEE-Docking"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
   { name = "Haohao Fu", email = "fhh2626@gmail.com" }
 ]
 dependencies = [
+  "autocgenff>=20261123",
   "biotite",
   "biopython",
   "dimorphite-dl",

@@ -4,10 +4,10 @@
 import collections
 import os
 import pathlib
+import re
 import shutil
-import subprocess
 import sys
-import traceback
+import tempfile
 import typing
 
 import Bio.PDB
@@ -25,6 +25,23 @@ third_party_tools.add_third_party_to_path()
 
 # Module-level reference for backward compatibility
 _SCRIPT_DIR = third_party_tools.get_third_party_dir().parent
+
+_CGENFF_V5_DIR = "cgenff_v5"
+_CGENFF_TOPOLOGY = "top_all36_cgenff.rtf"
+_CGENFF_PARAMETERS = "par_all36_cgenff.prm"
+_CGENFF_INCREMENTS = "par_all36_cgenff_increments.prm"
+_AUTOCGENFF_STREAM_TITLE = b"* AutoCGENFF local-v5 ligand stream"
+_VMD_DONE = "BFEE_DOCKING_VMD_DONE"
+
+
+def _tcl_word(value: str) -> str:
+    escaped = "".join("\\" + char if char in '\\"$[]{}' else char for char in value)
+    return f'"{escaped}"'
+
+
+def _tcl_path(path: str | pathlib.Path) -> str:
+    return _tcl_word(pathlib.Path(path).as_posix())
+
 
 class MDPrepper:
     """
@@ -44,7 +61,7 @@ class MDPrepper:
         ligand_smiles: str,
         ph: float,
         output_dir: str,
-        vmd_path: str
+        vmd_path: typing.Optional[str],
     ):
         """
         Initialize MDPrepper.
@@ -80,11 +97,32 @@ class MDPrepper:
         # Get absolute path to obabel executable (for mol2 generation)
         self._obabel_executable = third_party_tools.get_obabel_executable()
         
-        # Get VMD executable path and verify it exists
-        self._vmd_executable = third_party_tools.get_vmd_executable(vmd_path)
-        if not self._vmd_executable.exists():
+        # Ligand parameterization needs no VMD. Require it only for VMD steps.
+        self._vmd_executable = third_party_tools.get_vmd_executable(vmd_path) if vmd_path is not None else None
+        if self._vmd_executable is not None and not self._vmd_executable.is_file():
             raise FileNotFoundError(f"VMD executable not found at: {self._vmd_executable}")
     
+    def _run_vmd_outputs(self, script: pathlib.Path, cwd: pathlib.Path, *outputs: pathlib.Path) -> str:
+        if self._vmd_executable is None:
+            raise ValueError("Select a VMD executable before building the system.")
+
+        def signature(path: pathlib.Path):
+            try:
+                stat = path.stat()
+                return stat.st_size, stat.st_mtime_ns
+            except FileNotFoundError:
+                return None
+
+        previous = [signature(path) for path in outputs]
+        stdout = third_party_tools.run_vmd(self._vmd_executable, script, cwd)
+        if _VMD_DONE not in stdout.splitlines():
+            raise RuntimeError(f"VMD did not complete {script.name}.\n{stdout[-2000:]}")
+        for path, old in zip(outputs, previous, strict=True):
+            current = signature(path)
+            if not current or not current[0] or current == old:
+                raise RuntimeError(f"VMD did not create a fresh {path.name} in {script.name}.\n{stdout[-2000:]}")
+        return stdout
+
     # ========== Private Helper Functions for PDB Parsing ==========
     
     @staticmethod
@@ -1135,6 +1173,7 @@ class MDPrepper:
         cys_sg = u.select_atoms("(resname CYS or resname CYX) and name SG")
         
         if len(cys_sg) == 0:
+            u.trajectory.close()
             print("No cysteine residues with SG atoms found in the structure.")
             self._disulfide_bonds = []
             return self._disulfide_bonds
@@ -1167,6 +1206,7 @@ class MDPrepper:
                     
                     disulfide_bonds.append((res1_info, res2_info, distance))
         
+        u.trajectory.close()
         # Store in private variable
         self._disulfide_bonds = disulfide_bonds
         
@@ -1269,11 +1309,7 @@ class MDPrepper:
         print(f"  VMD Executable: {self._vmd_executable}")
         print(f"  TCL Script: {tcl_script_path}")
         
-        stdout = third_party_tools.run_vmd(
-            vmd_executable=self._vmd_executable,
-            tcl_script=tcl_script_path,
-            cwd=output_dir
-        )
+        stdout = self._run_vmd_outputs(tcl_script_path, output_dir, output_psf_path, output_pdb_path)
         print("VMD psfgen execution successful!")
         if stdout:
             print(f"STDOUT:\n{stdout}")
@@ -1707,13 +1743,13 @@ class MDPrepper:
             segments_info: Segment information from _analyze_pdb_structure
         """
         # Convert all paths to POSIX format (forward slashes) for TCL
-        topology_posix = pathlib.Path(topology_file).as_posix()
-        output_psf_posix = pathlib.Path(output_psf_path).as_posix()
-        output_pdb_posix = pathlib.Path(output_pdb_path).as_posix()
+        topology_posix = _tcl_path(topology_file)
+        output_psf_posix = _tcl_path(output_psf_path)
+        output_pdb_posix = _tcl_path(output_pdb_path)
         
         # Get the path to toppar_water_ions.str for water and ion topology
         water_ions_topology = third_party_tools.get_third_party_dir() / "force_field" / "toppar_water_ions.str"
-        water_ions_topology_posix = water_ions_topology.as_posix()
+        water_ions_topology_posix = _tcl_path(water_ions_topology)
         
         # Check if we have water or metal segments
         has_water = 'SOLV' in split_pdb_paths
@@ -1764,7 +1800,7 @@ class MDPrepper:
                 print(f"  Warning: No split PDB file for segment {seg_id}, skipping")
                 continue
             
-            seg_pdb_posix = pathlib.Path(split_pdb_paths[seg_id]).as_posix()
+            seg_pdb_posix = _tcl_path(split_pdb_paths[seg_id])
             
             lines.append(f"# Segment {seg_id} (Chain {chain_id})")
             lines.append(f"segment {seg_id} {{")
@@ -1776,7 +1812,7 @@ class MDPrepper:
         
         # Process water segment if present
         if has_water:
-            water_pdb_posix = pathlib.Path(split_pdb_paths['SOLV']).as_posix()
+            water_pdb_posix = _tcl_path(split_pdb_paths['SOLV'])
             lines.append("# Water segment")
             lines.append("segment SOLV {")
             lines.append("  first NONE")
@@ -1790,7 +1826,7 @@ class MDPrepper:
         if has_metals:
             lines.append("# Metal ion segments")
             for seg_id in sorted(metal_segments):
-                metal_pdb_posix = pathlib.Path(split_pdb_paths[seg_id]).as_posix()
+                metal_pdb_posix = _tcl_path(split_pdb_paths[seg_id])
                 lines.append(f"# Metal ion segment {seg_id}")
                 lines.append(f"segment {seg_id} {{")
                 lines.append("  first NONE")
@@ -1807,17 +1843,17 @@ class MDPrepper:
         for seg_id in segments_info.keys():
             if seg_id not in split_pdb_paths:
                 continue
-            seg_pdb_posix = pathlib.Path(split_pdb_paths[seg_id]).as_posix()
+            seg_pdb_posix = _tcl_path(split_pdb_paths[seg_id])
             lines.append(f"coordpdb {seg_pdb_posix} {seg_id}")
         
         # Water segment
         if has_water:
-            water_pdb_posix = pathlib.Path(split_pdb_paths['SOLV']).as_posix()
+            water_pdb_posix = _tcl_path(split_pdb_paths['SOLV'])
             lines.append(f"coordpdb {water_pdb_posix} SOLV")
         
         # Metal ion segments
         for seg_id in sorted(metal_segments):
-            metal_pdb_posix = pathlib.Path(split_pdb_paths[seg_id]).as_posix()
+            metal_pdb_posix = _tcl_path(split_pdb_paths[seg_id])
             lines.append(f"coordpdb {metal_pdb_posix} {seg_id}")
         
         lines.append("")
@@ -1870,7 +1906,7 @@ class MDPrepper:
         lines.append("")
         
         lines.append("# Done")
-        lines.append("exit")
+        lines.extend([f'puts "{_VMD_DONE}"', "exit"])
         
         # Write TCL script
         with open(tcl_script_path, 'w', encoding='utf-8') as f:
@@ -1914,18 +1950,20 @@ class MDPrepper:
         lines.append("package require psfgen")
         lines.append("")
         
-        # Load topology files (convert to POSIX format for TCL)
         lines.append("# Load topology files")
         for topo_file in topology_files:
-            topo_posix = pathlib.Path(topo_file).as_posix()
-            lines.append(f"topology {topo_posix}")
+            lines.append(f"topology {_tcl_path(topo_file)}")
         lines.append("")
-        
-        # Convert paths to POSIX format
-        input_pdb_posix = pathlib.Path(input_pdb_path).as_posix()
-        output_psf_posix = pathlib.Path(output_psf_path).as_posix()
-        output_pdb_posix = pathlib.Path(output_pdb_path).as_posix()
-        
+
+        input_pdb_posix = _tcl_path(input_pdb_path)
+        output_psf_posix = _tcl_path(output_psf_path)
+        output_pdb_posix = _tcl_path(output_pdb_path)
+
+        with open(input_pdb_path, encoding="ascii") as pdb:
+            pdb_residue = next((line[17:20].strip() for line in pdb if line.startswith(("ATOM  ", "HETATM"))), "")
+        if pdb_residue and pdb_residue != residue_name:
+            lines.append(f"pdbalias residue {_tcl_word(pdb_residue)} {_tcl_word(residue_name)}")
+
         # Create segment for ligand
         lines.append(f"# Create ligand segment")
         lines.append(f"segment {segment_id} {{")
@@ -1955,7 +1993,7 @@ class MDPrepper:
         lines.append("")
         
         lines.append("# Done")
-        lines.append("exit")
+        lines.extend([f'puts "{_VMD_DONE}"', "exit"])
         
         # Write TCL script
         with open(tcl_script_path, 'w', encoding='utf-8') as f:
@@ -2047,11 +2085,7 @@ class MDPrepper:
         print(f"  VMD Executable: {self._vmd_executable}")
         print(f"  TCL Script: {tcl_script_path}")
         
-        stdout = third_party_tools.run_vmd(
-            vmd_executable=self._vmd_executable,
-            tcl_script=tcl_script_path,
-            cwd=output_dir
-        )
+        stdout = self._run_vmd_outputs(tcl_script_path, output_dir, output_psf_path, output_pdb_path)
         print("VMD psfgen execution successful!")
         if stdout:
             print(f"STDOUT:\n{stdout}")
@@ -2069,7 +2103,7 @@ class MDPrepper:
         output_pdb_path: str
     ):
         """
-        Generate TCL script for merging multiple PSF/PDB pairs using VMD TopoTools.
+        Generate a psfgen merge script that retains lone pairs and PSF metadata.
         
         Args:
             tcl_script_path: Path to output TCL script
@@ -2077,52 +2111,17 @@ class MDPrepper:
             output_psf_path: Path for merged output PSF file
             output_pdb_path: Path for merged output PDB file
         """
-        lines = []
-        
-        # Header
-        lines.append("# PSF/PDB Merge Script")
-        lines.append("# Generated by MDPrepper")
-        lines.append("# Using TopoTools to merge multiple PSF/PDB pairs")
-        lines.append("")
-        
-        # Load required packages
-        lines.append("# Load required packages")
-        lines.append("package require topotools 1.6")
-        lines.append("")
-        
-        # Convert output paths to POSIX format for TCL
-        output_psf_posix = pathlib.Path(output_psf_path).as_posix()
-        output_pdb_posix = pathlib.Path(output_pdb_path).as_posix()
-        
-        # Initialize molecule list
-        lines.append("# Load to be merged molecules into VMD")
-        lines.append("set midlist {}")
-        lines.append("")
-        
-        # Load each PSF/PDB pair and append to list
-        for i, (psf_path, pdb_path) in enumerate(psf_pdb_pairs):
-            psf_posix = pathlib.Path(psf_path).as_posix()
-            pdb_posix = pathlib.Path(pdb_path).as_posix()
-            
-            lines.append(f"# Load pair {i + 1}: {pathlib.Path(psf_path).name}")
-            lines.append(f'set mol [mol new "{psf_posix}" waitfor all]')
-            lines.append(f'mol addfile "{pdb_posix}" $mol')
-            lines.append("lappend midlist $mol")
-            lines.append("")
-        
-        # Merge all molecules using TopoTools
-        lines.append("# Do the magic - merge all molecules")
-        lines.append("set mol [::TopoTools::mergemols $midlist]")
-        lines.append("")
-        
-        # Write merged output files
-        lines.append("# Write merged PSF and PDB files")
-        lines.append(f'animate write psf "{output_psf_posix}" $mol')
-        lines.append(f'animate write pdb "{output_pdb_posix}" $mol')
-        lines.append("")
-        
-        lines.append("# Done")
-        lines.append("exit")
+        # Loading PSF files as VMD molecules and rewriting with TopoTools
+        # discards CHARMM lone-pair definitions. Merge directly in psfgen.
+        lines = ["package require psfgen"]
+        for psf_path, pdb_path in psf_pdb_pairs:
+            lines.append(f"readpsf {_tcl_path(psf_path)} pdb {_tcl_path(pdb_path)}")
+        lines.extend([
+            f"writepsf {_tcl_path(output_psf_path)}",
+            f"writepdb {_tcl_path(output_pdb_path)}",
+            f'puts "{_VMD_DONE}"',
+            "exit",
+        ])
         
         # Write TCL script
         with open(tcl_script_path, 'w', encoding='utf-8') as f:
@@ -2138,7 +2137,7 @@ class MDPrepper:
         output_pdb_path: typing.Optional[str] = None
     ) -> typing.Tuple[str, str]:
         """
-        Merge multiple PSF/PDB file pairs into a single PSF/PDB pair using VMD TopoTools.
+        Merge PSF/PDB pairs with distinct segment IDs using VMD psfgen.
         
         This method is useful for combining protein and ligand structures, or
         merging multiple molecules into a single system for MD simulation.
@@ -2209,11 +2208,7 @@ class MDPrepper:
         print(f"  VMD Executable: {self._vmd_executable}")
         print(f"  TCL Script: {tcl_script_path}")
         
-        stdout = third_party_tools.run_vmd(
-            vmd_executable=self._vmd_executable,
-            tcl_script=tcl_script_path,
-            cwd=output_dir
-        )
+        stdout = self._run_vmd_outputs(tcl_script_path, output_dir, output_psf_path, output_pdb_path)
         print("VMD merge execution successful!")
         if stdout:
             print(f"STDOUT:\n{stdout}")
@@ -2256,15 +2251,15 @@ class MDPrepper:
         lines.append("")
         
         # Convert paths to POSIX format for TCL
-        input_psf_posix = pathlib.Path(input_psf_path).as_posix()
-        input_pdb_posix = pathlib.Path(input_pdb_path).as_posix()
-        output_prefix_posix = pathlib.Path(output_prefix).as_posix()
+        input_psf_posix = _tcl_path(input_psf_path)
+        input_pdb_posix = _tcl_path(input_pdb_path)
+        output_prefix_posix = _tcl_path(output_prefix)
         
         if use_cubic_box:
             # Calculate cubic box dimensions
             lines.append("# Load molecule to calculate bounding box")
-            lines.append(f'set mol [mol new "{input_psf_posix}" type psf waitfor all]')
-            lines.append(f'mol addfile "{input_pdb_posix}" type pdb molid $mol waitfor all')
+            lines.append(f'set mol [mol new {input_psf_posix} type psf waitfor all]')
+            lines.append(f'mol addfile {input_pdb_posix} type pdb molid $mol waitfor all')
             lines.append("")
             
             lines.append("# Calculate molecule bounding box")
@@ -2329,15 +2324,15 @@ class MDPrepper:
             lines.append("set boxMin [list $cubeMinX $cubeMinY $cubeMinZ]")
             lines.append("set boxMax [list $cubeMaxX $cubeMaxY $cubeMaxZ]")
             lines.append("set minmaxBox [list $boxMin $boxMax]")
-            lines.append(f'solvate "{input_psf_posix}" "{input_pdb_posix}" -minmax $minmaxBox -o "{output_prefix_posix}"')
+            lines.append(f'solvate {input_psf_posix} {input_pdb_posix} -minmax $minmaxBox -o {output_prefix_posix}')
         else:
             # Simple solvation with padding on each side
             lines.append("# Solvate with rectangular water box")
-            lines.append(f'solvate "{input_psf_posix}" "{input_pdb_posix}" -t {padding} -o "{output_prefix_posix}"')
+            lines.append(f'solvate {input_psf_posix} {input_pdb_posix} -t {padding} -o {output_prefix_posix}')
         
         lines.append("")
         lines.append("# Done")
-        lines.append("exit")
+        lines.extend([f'puts "{_VMD_DONE}"', "exit"])
         
         # Write TCL script
         with open(tcl_script_path, 'w', encoding='utf-8') as f:
@@ -2429,11 +2424,9 @@ class MDPrepper:
         print(f"  VMD Executable: {self._vmd_executable}")
         print(f"  TCL Script: {tcl_script_path}")
         
-        stdout = third_party_tools.run_vmd(
-            vmd_executable=self._vmd_executable,
-            tcl_script=tcl_script_path,
-            cwd=output_dir
-        )
+        # The solvate plugin creates working files with fixed names.
+        with tempfile.TemporaryDirectory(dir=temp_dir) as work:
+            stdout = self._run_vmd_outputs(tcl_script_path, pathlib.Path(work), output_psf_path, output_pdb_path)
         print("VMD solvate execution successful!")
         if stdout:
             print(f"STDOUT:\n{stdout}")
@@ -2495,27 +2488,27 @@ class MDPrepper:
         lines.append("")
         
         # Convert paths to POSIX format for TCL
-        input_psf_posix = pathlib.Path(input_psf_path).as_posix()
-        input_pdb_posix = pathlib.Path(input_pdb_path).as_posix()
-        output_prefix_posix = pathlib.Path(output_prefix).as_posix()
+        input_psf_posix = _tcl_path(input_psf_path)
+        input_pdb_posix = _tcl_path(input_pdb_path)
+        output_prefix_posix = _tcl_path(output_prefix)
         
         # Build autoionize command
         lines.append("# Add ions to neutralize and set salt concentration")
         
         if neutralize:
             # autoionize with -neutralize flag and salt concentration
-            lines.append(f'autoionize -psf "{input_psf_posix}" -pdb "{input_pdb_posix}" '
+            lines.append(f'autoionize -psf {input_psf_posix} -pdb {input_pdb_posix} '
                         f'-sc {salt_concentration} -cation {cation} -anion {anion} '
-                        f'-o "{output_prefix_posix}"')
+                        f'-o {output_prefix_posix}')
         else:
             # autoionize without neutralization (just add salt)
-            lines.append(f'autoionize -psf "{input_psf_posix}" -pdb "{input_pdb_posix}" '
+            lines.append(f'autoionize -psf {input_psf_posix} -pdb {input_pdb_posix} '
                         f'-sc {salt_concentration} -cation {cation} -anion {anion} '
-                        f'-nna 0 -ncl 0 -o "{output_prefix_posix}"')
+                        f'-nna 0 -ncl 0 -o {output_prefix_posix}')
         
         lines.append("")
         lines.append("# Done")
-        lines.append("exit")
+        lines.extend([f'puts "{_VMD_DONE}"', "exit"])
         
         # Write TCL script
         with open(tcl_script_path, 'w', encoding='utf-8') as f:
@@ -2638,11 +2631,7 @@ class MDPrepper:
         print(f"  VMD Executable: {self._vmd_executable}")
         print(f"  TCL Script: {tcl_script_path}")
         
-        stdout = third_party_tools.run_vmd(
-            vmd_executable=self._vmd_executable,
-            tcl_script=tcl_script_path,
-            cwd=output_dir
-        )
+        stdout = self._run_vmd_outputs(tcl_script_path, output_dir, output_psf_path, output_pdb_path)
         print("VMD autoionize execution successful!")
         if stdout:
             print(f"STDOUT:\n{stdout}")
@@ -2736,207 +2725,91 @@ class MDPrepper:
         return temp_pdb
     
     def _assign_bond_orders_from_template(self, template, pdb_path: pathlib.Path):
-        """
-        Assign bond orders from SMILES template to PDB structure.
-        
-        Args:
-            template: RDKit molecule from SMILES with correct bond orders
-            pdb_path: Path to cleaned PDB file
-            
-        Returns:
-            RDKit molecule with assigned bond orders
-            
-        Raises:
-            ValueError: If PDB parsing fails
-            RuntimeError: If bond order assignment fails
-        """
-        pdb_mol = rdkit.Chem.MolFromPDBFile(str(pdb_path), removeHs=False, sanitize=False)
-        
-        if pdb_mol is None:
-            raise ValueError(f"Failed to read PDB file with RDKit: {pdb_path}")
-        
-        print("  Assigning bond orders from SMILES template...")
-        
-        try:
-            mol_with_bonds = rdkit.Chem.AllChem.AssignBondOrdersFromTemplate(template, pdb_mol)
-        except Exception as e:
-            print(f"  Error during bond order assignment: {e}")
-            print("  Attempting alternative method with sanitization...")
-            try:
-                rdkit.Chem.SanitizeMol(pdb_mol)
-                mol_with_bonds = rdkit.Chem.AllChem.AssignBondOrdersFromTemplate(template, pdb_mol)
-            except Exception as e2:
-                print(f"  Standard assignment failed: {e2}")
-                print("  FALLBACK: Forcing coordinates from PDB to SMILES template (Trusting SMILES Topology)...")
-                
-                # Clone template to avoid modifying original
-                mol_with_bonds = rdkit.Chem.Mol(template)
-                mol_with_bonds.RemoveAllConformers()
-                
-                pdb_conf = pdb_mol.GetConformer()
-                new_conf = rdkit.Chem.Conformer(mol_with_bonds.GetNumAtoms())
-                
-                # Helper to transfer PDB info
-                def transfer_pdb_info(src_atom, dst_atom):
-                    info = src_atom.GetPDBResidueInfo()
-                    if info:
-                        dst_atom.SetProp("AtomName", info.GetName().strip())
-                        dst_atom.SetProp("ResName", info.GetResidueName().strip())
-                        dst_atom.SetProp("ResId", str(info.GetResidueNumber()))
-                        dst_atom.SetProp("ChainId", info.GetChainId().strip())
+        """Map the complete pose to the SMILES graph, then restore missing hydrogens."""
+        chem = rdkit.Chem
+        pose = chem.MolFromPDBFile(str(pdb_path), removeHs=False, sanitize=False)
+        if pose is None or not pose.GetNumAtoms():
+            raise ValueError(f"Could not read ligand atoms from {pdb_path}")
 
-                # Check if we can do 1-to-1 mapping
-                if template.GetNumAtoms() == pdb_mol.GetNumAtoms():
-                    # 1-to-1 Mapping
-                    for i in range(mol_with_bonds.GetNumAtoms()):
-                        pos = pdb_conf.GetAtomPosition(i)
-                        new_conf.SetAtomPosition(i, pos)
-                        transfer_pdb_info(pdb_mol.GetAtomWithIdx(i), mol_with_bonds.GetAtomWithIdx(i))
-                    mol_with_bonds.AddConformer(new_conf, assignId=True)
-                    print("  Successfully forced PDB coordinates onto SMILES structure (1-to-1).")
-                    
-                else:
-                    # MCS-based Smart Alignment (handles atom order differences)
-                    print(f"  Atom count mismatch or alignment check needed. Using MCS to map PDB structure to SMILES...")
-                    from rdkit.Chem import rdFMCS
-                    
-                    # 1. Find Maximum Common Substructure (MCS) strict on elements
-                    mcs_result = rdFMCS.FindMCS(
-                        [mol_with_bonds, pdb_mol],
-                        atomCompare=rdFMCS.AtomCompare.CompareElements,
-                        bondCompare=rdFMCS.BondCompare.CompareAny,
-                        matchValences=False,
-                        ringMatchesRingOnly=False,
-                        completeRingsOnly=False,
-                        timeout=5
-                    )
-                    
-                    if not mcs_result.smartsString:
-                         raise RuntimeError("Could not find any common substructure between SMILES and PDB!")
+        def heavy_graph(mol, *, query=False):
+            graph = chem.RWMol()
+            indices = {}
+            for atom in mol.GetAtoms():
+                element = atom.GetAtomicNum()
+                if element != 1:
+                    graph_atom = chem.AtomFromSmarts(f"[#{element}]") if query else chem.Atom(element)
+                    indices[atom.GetIdx()] = graph.AddAtom(graph_atom)
+            for bond in mol.GetBonds():
+                a, b = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                if a in indices and b in indices:
+                    graph.AddBond(indices[a], indices[b], chem.BondType.SINGLE)
+            return graph.GetMol(), list(indices)
 
-                    common_mol = rdkit.Chem.MolFromSmarts(mcs_result.smartsString)
-                    print(f"  MCS found (SMARTS len: {len(mcs_result.smartsString)}), mapping atoms...")
-                    
-                    match_smi = mol_with_bonds.GetSubstructMatch(common_mol)
-                    match_pdb = pdb_mol.GetSubstructMatch(common_mol)
-                    
-                    if len(match_smi) != len(match_pdb):
-                        # Should rarely happen if derived from MCS
-                        print("  Warning: MCS match length mismatch.")
-                    
-                    # 2. Build Coordinate Map: SMILES_Index -> PDB_Coordinate
-                    coord_map = {}
-                    fixed_indices = [] # Keep track for naming/info transfer
-                    
-                    for i in range(len(match_smi)):
-                        smi_idx = match_smi[i]
-                        pdb_idx = match_pdb[i]
-                        
-                        smi_atom = mol_with_bonds.GetAtomWithIdx(smi_idx)
-                        pdb_atom = pdb_mol.GetAtomWithIdx(pdb_idx)
-                        
-                        # Double check element match (MCS should guarantee this but safe is good)
-                        if smi_atom.GetSymbol() != pdb_atom.GetSymbol():
-                             # E.g. MCS general match on aromatic might match c to n?
-                             continue
+        pose_graph, pose_heavy = heavy_graph(pose, query=True)
+        template_graph, template_heavy = heavy_graph(template)
+        if (pose_graph.GetNumAtoms() != template_graph.GetNumAtoms()
+                or pose_graph.GetNumBonds() != template_graph.GetNumBonds()):
+            raise ValueError("Docked ligand heavy-atom connectivity does not match its SMILES.")
+        matches = template_graph.GetSubstructMatches(pose_graph, uniquify=False)
+        if not matches:
+            raise ValueError("Docked ligand heavy-atom connectivity does not match its SMILES.")
 
-                        pos = pdb_conf.GetAtomPosition(pdb_idx)
-                        coord_map[smi_idx] = pos
-                        fixed_indices.append(smi_idx)
-                        
-                        # Transfer Props
-                        transfer_pdb_info(pdb_atom, smi_atom)
-                    
-                    print(f"  Mapped {len(coord_map)} atoms via MCS.")
-                    
-                    if len(coord_map) < mol_with_bonds.GetNumAtoms() * 0.5:
-                        print("  Warning: Less than 50% of atoms mapped! Structure might be very wrong.")
+        def hydrogen_neighbors(mol, indices):
+            return [[n.GetIdx() for n in mol.GetAtomWithIdx(i).GetNeighbors() if n.GetAtomicNum() == 1]
+                    for i in indices]
 
-                    # Add empty conformer to hold result
-                    mol_with_bonds.AddConformer(new_conf, assignId=True)
+        pose_h = hydrogen_neighbors(pose, pose_heavy)
+        template_h = hydrogen_neighbors(template, template_heavy)
+        match = next((m for m in matches if all(len(h) <= len(template_h[j]) for h, j in zip(pose_h, m))), None)
+        if match is None:
+            raise ValueError("Docked hydrogens do not match the SMILES protonation state.")
+        mapped = {source: template_heavy[i] for source, i in zip(pose_heavy, match, strict=True)}
+        for h, j in zip(pose_h, match, strict=True):
+            for source, target in zip(h, template_h[j]):
+                if source in mapped:
+                    raise ValueError("Could not map a docked hydrogen to a unique heavy atom.")
+                mapped[source] = target
+        if len(mapped) != pose.GetNumAtoms():
+            raise ValueError("Could not map all docked ligand atoms.")
+        used = set(mapped.values())
 
-                    # Now handle unmapped atoms via Constrained Embedding (below)
-                    print("  Regenerating coordinates for unmapped atoms (including Hydrogens)...")
-                    
-                    try:
-                        
-                        # 2. Embed molecule using constraints
-                        # This generates a 3D structure that respects the fixed coordinates in coord_map
-                        # forceTol=0.01 makes it strictly respect the map
-                        res = rdkit.Chem.AllChem.EmbedMolecule(
-                            mol_with_bonds,
-                            coordMap=coord_map,
-                            useExpTorsionAnglePrefs=True,
-                            useBasicKnowledge=True,
-                            enforceChirality=True
-                        )
-                        
-                        if res == -1:
-                             print("  Warning: Constrained Embedding failed. Retrying with random coordinates...")
-                             res = rdkit.Chem.AllChem.EmbedMolecule(mol_with_bonds, coordMap=coord_map, useRandomCoords=True)
-                        
-                        if res != -1:
-                             # 3. STRICTLY restore heavy atom coordinates from PDB
-                             # Embedding might slightly drift or relax heavy atoms, but valid docking requires exact PDB coords
-                             conf = mol_with_bonds.GetConformer()
-                             for smi_idx, pos in coord_map.items():
-                                 conf.SetAtomPosition(smi_idx, pos)
-                             
-                             # 4. Minimize ONLY Hydrogens to fix bond lengths/clashes
-                             # Fix heavy atoms
-                             ff = rdkit.Chem.AllChem.MMFFGetMoleculeForceField(mol_with_bonds, confId=0)
-                             if ff is None: # Fallback to UFF
-                                 ff = rdkit.Chem.AllChem.UFFGetMoleculeForceField(mol_with_bonds)
-                             
-                             if ff:
-                                 for smi_idx in coord_map.keys():
-                                     ff.AddFixedPoint(smi_idx)
-                                 ff.Initialize()
-                                 ff.Minimize(maxIts=500)
-                                 print("  Regenerated H coordinates and refined geometry.")
-                             else:
-                                 print("  Warning: Could not set up ForceField for hydrogen refinement.")
-                        else:
-                             print("  Error: Failed to embed molecule dimensions.")
-                             
-                    except Exception as e_gen:
-                         print(f"  Warning: Hydrogen generation failed: {e_gen}")
-                         traceback.print_exc()
+        # Use original pose order for its atoms and append the missing hydrogens.
+        order = [mapped[i] for i in range(pose.GetNumAtoms())]
+        order.extend(i for i in range(template.GetNumAtoms()) if i not in used)
+        molecule = chem.RenumberAtoms(template, order)
+        pose_conf = pose.GetConformer()
+        coord_map = {i: pose_conf.GetAtomPosition(i) for i in range(pose.GetNumAtoms())}
+        for i in coord_map:
+            info = pose.GetAtomWithIdx(i).GetPDBResidueInfo()
+            if info is not None:
+                molecule.GetAtomWithIdx(i).SetProp("AtomName", info.GetName().strip())
+                molecule.GetAtomWithIdx(i).SetProp("ResName", info.GetResidueName().strip())
+                molecule.GetAtomWithIdx(i).SetProp("ResId", str(info.GetResidueNumber()))
 
-        print("  Successfully assigned bond orders (and coordinates)")
-        return mol_with_bonds
-    
-    def _transfer_formal_charges(self, template, mol):
-        """
-        Transfer formal charges from template to molecule.
-        
-        Args:
-            template: RDKit molecule (source of charges)
-            mol: RDKit molecule (destination)
-        """
-        print("  Transferring formal charges from template...")
-        try:
-            # Find match between mol (pdb derived) and template (smiles)
-            # Both should now have consistent bond orders/connectivity
-            match = mol.GetSubstructMatch(template)
-            if not match or len(match) != mol.GetNumAtoms():
-                # Try fallback: if sizes match, assume 1-to-1 if AssignBondOrders worked? 
-                # No, AssignBondOrders matched based on structure. 
-                # If GetSubstructMatch fails here, something is weird.
-                print(f"  Warning: Could not find perfect substructure match for charge transfer (Match len: {len(match) if match else 0})")
-                return
+        if len(coord_map) == molecule.GetNumAtoms():
+            molecule.AddConformer(chem.Conformer(molecule.GetNumAtoms()), assignId=True)
+        elif chem.AllChem.EmbedMolecule(molecule, coordMap=coord_map, randomSeed=19) < 0:
+            if chem.AllChem.EmbedMolecule(molecule, coordMap=coord_map, useRandomCoords=True, randomSeed=19) < 0:
+                raise ValueError("Could not generate coordinates for missing ligand hydrogens.")
+        conf = molecule.GetConformer()
+        conf.Set3D(True)
+        for i, position in coord_map.items():
+            conf.SetAtomPosition(i, position)
 
-            for template_idx, mol_idx in enumerate(match):
-                template_atom = template.GetAtomWithIdx(template_idx)
-                mol_atom = mol.GetAtomWithIdx(mol_idx)
-                if template_atom.GetFormalCharge() != 0:
-                    mol_atom.SetFormalCharge(template_atom.GetFormalCharge())
-                
-            print(f"  Transferred formal charges based on substructure match")
-            
-        except Exception as e:
-            print(f"  Warning: Failed to transfer formal charges: {e}")
-    
+        if len(coord_map) < molecule.GetNumAtoms():
+            properties = chem.AllChem.MMFFGetMoleculeProperties(molecule)
+            ff = None
+            if properties is not None:
+                ff = chem.AllChem.MMFFGetMoleculeForceField(molecule, properties)
+            elif chem.AllChem.UFFHasAllMoleculeParams(molecule):
+                ff = chem.AllChem.UFFGetMoleculeForceField(molecule)
+            if ff is not None:
+                for i in coord_map:
+                    ff.AddFixedPoint(i)
+                ff.Initialize()
+                ff.Minimize(maxIts=500)
+        return molecule
+
     def _extract_bond_information(self, mol):
         """
         Extract bond information from RDKit molecule.
@@ -3138,9 +3011,9 @@ class MDPrepper:
         mol2_atom_types: list,
         charges: list,
         mol=None
-    ):
+    ) -> list[str]:
         """
-        Write MOL2 file with preserved atom names.
+        Write a MOL2 file and return its atom names in molecule order.
         
         Args:
             output_path: Path to output MOL2 file
@@ -3159,7 +3032,9 @@ class MDPrepper:
             num_atoms = mol.GetNumAtoms()
         elif atoms:
             num_atoms = len(atoms)
-            
+
+        atom_names = []
+        reserved_names = {atom.name.upper() for atom in atoms} if atoms is not None else set()
         with open(output_path, 'w') as f:
             # Header - MOLECULE record
             f.write("@<TRIPOS>MOLECULE\n")
@@ -3234,11 +3109,15 @@ class MDPrepper:
                 if atom_name.startswith("A") and atom_name[1:].isdigit():
                      # Likely default name
                      if symbol == 'H':
-                         h_count += 1
-                         atom_name = f"H{h_count}"
+                         while True:
+                             h_count += 1
+                             atom_name = f"H{h_count}"
+                             if atom_name not in reserved_names:
+                                 break
                      else:
                          atom_name = f"{symbol}{atom_id}"
 
+                atom_names.append(atom_name)
                 atom_type = mol2_atom_types[i]
                 charge = charges[i] if i < len(charges) else 0.0
                 
@@ -3277,7 +3156,8 @@ class MDPrepper:
                  first_res_id = atom.resid if hasattr(atom, 'resid') else 1
 
             f.write(f"{first_res_id:>5d} {first_res_name:<8s} {1:>5d} ****               0 ****  **** \n")
-    
+        return atom_names
+
     def generate_mol2(
         self,
         pdb_path: str,
@@ -3303,34 +3183,29 @@ class MDPrepper:
             ValueError: If SMILES is invalid or structure doesn't match PDB
             RuntimeError: If mol2 file generation fails
         """
-        # Prepare paths
-        pdb_path = pathlib.Path(pdb_path).resolve()
-        output_dir = pathlib.Path(self._output_dir).resolve()
+        output_dir = pathlib.Path(self._output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        if output_mol2_path is None:
-            output_mol2_path = output_dir / "ligand.mol2"
-        else:
-            output_mol2_path = pathlib.Path(output_mol2_path).resolve()
-        
-        print(f"Generating mol2 file from PDB using MDAnalysis (preserving atom names)...")
+        output_path = pathlib.Path(output_mol2_path).resolve() if output_mol2_path else output_dir / "ligand.mol2"
+        self._write_ligand_mol2(pathlib.Path(pdb_path).resolve(), smiles, output_path)
+        return str(output_path)
+
+    def _write_ligand_mol2(
+        self, pdb_path: pathlib.Path, smiles: str, output_mol2_path: pathlib.Path
+    ) -> rdkit.Chem.Mol:
+        """Write MOL2 and retain the named RDKit graph, including formal charges."""
+        print("Generating mol2 file from PDB using MDAnalysis (preserving atom names)...")
         print(f"  SMILES: {smiles}")
         print(f"  PDB: {pdb_path}")
         
         # Step 1: Create template from SMILES
         template, formal_charge = self._create_template_from_smiles(smiles)
         
-        # Step 2: Load PDB with MDAnalysis
+        # Read atom names and prepare the RDKit input from the same pose.
         atoms = self._load_pdb_with_mdanalysis(pdb_path, template.GetNumAtoms())
-        
-        # Step 3: Clean PDB and assign bond orders
-        temp_pdb_for_rdkit = self._clean_pdb_for_rdkit(pdb_path)
-        
+        temp_pdb_for_rdkit = None
         try:
+            temp_pdb_for_rdkit = self._clean_pdb_for_rdkit(pdb_path)
             mol_with_bonds = self._assign_bond_orders_from_template(template, temp_pdb_for_rdkit)
-            
-            # Transfer formal charges from template to ensure correct atom tying
-            self._transfer_formal_charges(template, mol_with_bonds)
             
             # Step 4: Extract bond information
             bonds, bond_dict = self._extract_bond_information(mol_with_bonds)
@@ -3342,19 +3217,23 @@ class MDPrepper:
             charges = self._compute_gasteiger_charges(mol_with_bonds, mol_with_bonds.GetNumAtoms())
             
             # Step 7: Write MOL2 file
-            self._write_mol2_file(
+            names = self._write_mol2_file(
                 output_mol2_path, pdb_path, atoms, bonds, mol2_atom_types, charges, mol=mol_with_bonds
             )
-            
-            print(f"  Successfully generated MOL2 file with preserved atom names")
+            for atom, name in zip(mol_with_bonds.GetAtoms(), names, strict=True):
+                atom.SetProp("_TriposAtomName", name)
+                info = atom.GetPDBResidueInfo()
+                if info is not None:
+                    info.SetName(name)
+
+            print("  Successfully generated MOL2 file with preserved atom names")
             print(f"  Formal charge: {formal_charge}")
-            
-            return str(output_mol2_path)
+            return mol_with_bonds
         
         finally:
-            # Clean up temporary file
-            if temp_pdb_for_rdkit.exists():
-                temp_pdb_for_rdkit.unlink()
+            atoms.universe.trajectory.close()
+            if temp_pdb_for_rdkit is not None:
+                temp_pdb_for_rdkit.unlink(missing_ok=True)
     
     @staticmethod
     def fix_str_residue_name(
@@ -3488,39 +3367,109 @@ class MDPrepper:
         
         return final_pdb_path
     
-    def process_ligand(self) -> str:
-        """
-        Process ligand: generate MOL2 and copy PDB to fixed_files.
-        
-        Returns:
-            Path to the generated MOL2 file.
-        """
-        # Define output directory for fixed files
-        md_prepper_dir = pathlib.Path(self._output_dir) / "md_prepper"
-        fixed_files_dir = md_prepper_dir / "fixed_files"
-        fixed_files_dir.mkdir(parents=True, exist_ok=True)
-        
-        output_mol2 = fixed_files_dir / "ligand.mol2"
-        output_pdb = fixed_files_dir / "ligand.pdb"
-        
-        print("\nProcessing ligand pipeline...")
-        print(f"Output directory: {fixed_files_dir}")
-        
-        # 1. Generate MOL2
-        print("\nStep 1: Generating MOL2 file...")
-        self.generate_mol2(
-            pdb_path=self._ligand_pdb_path,
-            smiles=self._ligand_smiles,
-            output_mol2_path=str(output_mol2)
-        )
-        
-        # 2. Copy PDB
-        print("\nStep 2: Copying PDB file...")
-        shutil.copy(self._ligand_pdb_path, output_pdb)
-        print(f"Copied ligand PDB to: {output_pdb}")
-        
+    @staticmethod
+    def _is_autocgenff_stream(path: pathlib.Path) -> bool:
+        with path.open("rb") as stream:
+            title = stream.readline(len(_AUTOCGENFF_STREAM_TITLE) + 2)
+        return title.rstrip(b"\r\n") == _AUTOCGENFF_STREAM_TITLE
 
-        return str(output_mol2)
+    @staticmethod
+    def _validate_cgenff_v5(directory: pathlib.Path, filenames: tuple[str, ...]) -> None:
+        for name in filenames:
+            path = directory / name
+            with path.open("rb") as handle:
+                header = handle.read(4096)
+            if not re.search(rb"Force Field v\.\s*5\.0\b", header, re.IGNORECASE):
+                raise ValueError(f"Expected a CGenFF 5.0 data file: {path}")
+
+    @staticmethod
+    def _write_ligand_stream(
+        molecule: rdkit.Chem.Mol, force_field_dir: pathlib.Path, output_path: pathlib.Path
+    ) -> None:
+        from autocgenff import parameterize_v5, write_v5_stream
+
+        assignment = parameterize_v5(molecule, force_field_dir)
+        write_v5_stream(assignment, output_path, residue_name="UNL")
+
+    @staticmethod
+    def _write_autocgenff_pdb(molecule: rdkit.Chem.Mol, output_path: pathlib.Path) -> None:
+        """Keep docked coordinates and use the MOL2 names for all added hydrogens."""
+        molecule = rdkit.Chem.Mol(molecule)
+        for atom in molecule.GetAtoms():
+            name = atom.GetProp("_TriposAtomName").upper()
+            info = rdkit.Chem.AtomPDBResidueInfo(
+                f"{name:>4}", residueName="UNL", residueNumber=1, isHeteroAtom=True,
+            )
+            atom.SetMonomerInfo(info)
+        rdkit.Chem.MolToPDBFile(molecule, str(output_path))
+
+    def process_ligand(self, cgenff_dir: str = "") -> str:
+        """Prepare PDB/MOL2 and return the absolute path to the new AutoCGENFF stream."""
+        fixed_dir = pathlib.Path(self._output_dir) / "md_prepper" / "fixed_files"
+        fixed_dir.mkdir(parents=True, exist_ok=True)
+        pdb_path = pathlib.Path(self._ligand_pdb_path)
+        output_str = fixed_dir / "ligand.str"
+
+        with tempfile.TemporaryDirectory(dir=fixed_dir) as tmp:
+            stage = pathlib.Path(tmp)
+            pose = stage / "ligand.pdb"
+            shutil.copyfile(pdb_path, pose)
+            molecule = self._write_ligand_mol2(pose, self._ligand_smiles, stage / "ligand.mol2")
+            (stage / "ligand_input.smi").write_text(self._ligand_smiles, encoding="utf-8")
+
+            # Never replace a user-supplied file, or leave an old generated stream
+            # next to coordinates from a different pose after a failed assignment.
+            if output_str.is_symlink() or (output_str.exists() and (
+                not output_str.is_file() or not self._is_autocgenff_stream(output_str)
+            )):
+                raise ValueError(f"Move or rename your existing file before processing: {output_str}")
+            output_str.unlink(missing_ok=True)
+            (fixed_dir / "ligand_autocgenff.pdb").unlink(missing_ok=True)
+            for filename in ("ligand.mol2", "ligand.pdb", "ligand_input.smi"):
+                (stage / filename).replace(fixed_dir / filename)
+
+            if not cgenff_dir.strip():
+                raise ValueError("Select the CGenFF 5.0 force-field directory, or supply your own ligand topology file.")
+            source = pathlib.Path(cgenff_dir).expanduser().resolve()
+            base_files = (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS, _CGENFF_INCREMENTS)
+            missing = [name for name in base_files if not (source / name).is_file()]
+            if missing:
+                raise FileNotFoundError(f"Missing CGenFF 5.0 files in {source}: {', '.join(missing)}")
+
+            # Parameterize against a copy and save the matching base RTF/PRM for PSF/MD.
+            for filename in base_files:
+                shutil.copyfile(source / filename, stage / filename)
+            self._validate_cgenff_v5(stage, base_files)
+            self._write_ligand_stream(molecule, stage, stage / "ligand.str")
+            auto_pdb = stage / "ligand_autocgenff.pdb"
+            self._write_autocgenff_pdb(molecule, auto_pdb)
+            saved_base = fixed_dir / _CGENFF_V5_DIR
+            saved_base.mkdir(exist_ok=True)
+            for filename in (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS):
+                (stage / filename).replace(saved_base / filename)
+            auto_pdb.replace(fixed_dir / auto_pdb.name)
+            (stage / "ligand.str").replace(output_str)
+
+        return str(output_str)
+
+    @classmethod
+    def get_ligand_force_field_dir(cls, ligand_path: pathlib.Path, cgenff_dir: str = "") -> pathlib.Path:
+        """Use paired CGenFF 5.0 data for streams that declare it."""
+        auto = cls._is_autocgenff_stream(ligand_path)
+        if not auto:
+            with ligand_path.open("rb") as handle:
+                header = handle.read(8192)
+            if not re.search(rb"for use with CGenFF version\s+5\.0\b", header, re.IGNORECASE):
+                return third_party_tools.get_force_field_dir()
+        saved_base = ligand_path.parent / _CGENFF_V5_DIR
+        if auto and ligand_path.name == "ligand.str" and saved_base.is_dir():
+            base = saved_base
+        elif cgenff_dir.strip():
+            base = pathlib.Path(cgenff_dir).expanduser().resolve()
+        else:
+            raise FileNotFoundError(f"Select the CGenFF 5.0 directory for {ligand_path.name}.")
+        cls._validate_cgenff_v5(base, (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS))
+        return base
 
     def generate_system_psf(
         self,
@@ -3531,7 +3480,8 @@ class MDPrepper:
         salt_type: str,
         salt_concentration: float,
         temp_output_path: str,
-        output_path: str
+        output_path: str,
+        cgenff_dir: str = "",
     ) -> typing.Tuple[str, str]:
         """
         Generate final system PSF and PDB by running the full pipeline.
@@ -3546,13 +3496,14 @@ class MDPrepper:
         Args:
             protein_pdb_path: Path to prepared protein PDB
             ligand_pdb_path: Path to prepared ligand PDB (optional/empty if none)
-            ligand_str_path: Path to ligand topology STR file (optional/empty if none)
+            ligand_str_path: Path to a CHARMM ligand topology or stream (optional)
             padding: padding for water box in Angstroms
             salt_type: Salt type (e.g., "NaCl")
             salt_concentration: Salt concentration in M
             temp_output_path: Directory for intermediate files
             output_path: Directory for final output files
-            
+            cgenff_dir: Base CGenFF 5.0 directory for externally generated AutoCGENFF streams
+
         Returns:
             Tuple of (final_psf_path, final_pdb_path)
         """
@@ -3561,6 +3512,13 @@ class MDPrepper:
         final_dir = pathlib.Path(output_path).resolve()
         final_dir.mkdir(parents=True, exist_ok=True)
         
+        ligand_topology = pathlib.Path(ligand_str_path).expanduser().resolve() if ligand_str_path else None
+        force_field_dir = third_party_tools.get_force_field_dir()
+        if ligand_topology is not None:
+            if not ligand_topology.is_file():
+                raise FileNotFoundError(f"Ligand topology file not found: {ligand_topology}")
+            force_field_dir = self.get_ligand_force_field_dir(ligand_topology, cgenff_dir)
+
         # 1. Generate Protein PSF
         print(f"Generating protein PSF from {protein_pdb_path}")
         prot_psf, prot_pdb = self.generate_psf(
@@ -3573,23 +3531,31 @@ class MDPrepper:
         current_pdb = prot_pdb
         
         # 2. Generate Ligand PSF (if applicable)
+        temp_str_path = None
         if ligand_pdb_path and pathlib.Path(ligand_pdb_path).exists():
             print(f"Generating ligand PSF from {ligand_pdb_path}")
-            
-            topo_files = [str(third_party_tools.get_cgenff_topology_file())]
-            if ligand_str_path and pathlib.Path(ligand_str_path).exists():
-                # Copy STR file to temp dir to avoid modifying the original
-                temp_str_path = temp_dir / "ligand.str"
-                shutil.copy(ligand_str_path, temp_str_path)
-                
-                # Fix residue name in the copy to match "UNL"
-                print(f"Fixing residue name in {temp_str_path}...")
-                self.fix_str_residue_name(str(temp_str_path), new_residue_name="UNL")
-                
+
+            topo_files = [str(force_field_dir / _CGENFF_TOPOLOGY)]
+            if ligand_topology is not None:
+                temp_str_path = temp_dir / "ligand_for_psf.str"
+                self.fix_str_residue_name(str(ligand_topology), str(temp_str_path), new_residue_name="UNL")
+                # OpenMM expects a stream when loading ligand.str. Some manual
+                # files contain only a bare CHARMM topology, even with .str.
+                text = temp_str_path.read_text(encoding="utf-8")
+                if not any(line.upper().split()[:2] == ["READ", "RTF"] for line in text.splitlines()):
+                    temp_str_path.write_text(
+                        "* CHARMM ligand topology\n*\n\nread rtf card append\n" + text + "\nRETURN\n",
+                        encoding="utf-8",
+                    )
                 topo_files.append(str(temp_str_path))
             
+            pose_path = pathlib.Path(ligand_pdb_path).resolve()
+            auto_pdb = pose_path.with_name("ligand_autocgenff.pdb")
+            if (ligand_topology == pose_path.with_suffix(".str")
+                    and auto_pdb.is_file() and self._is_autocgenff_stream(ligand_topology)):
+                pose_path = auto_pdb
             lig_psf, lig_pdb = self.generate_ligand_psf(
-                input_pdb_path=ligand_pdb_path,
+                input_pdb_path=str(pose_path),
                 topology_files=topo_files,
                 output_psf_path=str(temp_dir / "ligand.psf"),
                 output_pdb_path=str(temp_dir / "ligand.pdb")
@@ -3617,19 +3583,37 @@ class MDPrepper:
             use_cubic_box=True
         )
         
-        # 5. Ionize System
+        # Stage the new system so a failed VMD run or parameter copy leaves the last one intact.
         print(f"Ionizing system with {salt_concentration} M {salt_type}...")
-        ionized_psf, ionized_pdb = self.ionize_system(
-            input_psf_path=solvated_psf,
-            input_pdb_path=solvated_pdb,
-            output_psf_path=str(final_dir / "ionized.psf"),
-            output_pdb_path=str(final_dir / "ionized.pdb"),
-            salt_type=salt_type,
-            salt_concentration=salt_concentration
-        )
-        
-        return ionized_psf, ionized_pdb
-    
+        with tempfile.TemporaryDirectory(dir=final_dir) as tmp:
+            stage = pathlib.Path(tmp)
+            self.ionize_system(
+                input_psf_path=solvated_psf,
+                input_pdb_path=solvated_pdb,
+                output_psf_path=str(stage / "ionized.psf"),
+                output_pdb_path=str(stage / "ionized.pdb"),
+                salt_type=salt_type,
+                salt_concentration=salt_concentration,
+            )
+            shutil.copyfile(force_field_dir / _CGENFF_PARAMETERS, stage / _CGENFF_PARAMETERS)
+            bundled = third_party_tools.get_force_field_dir()
+            for filename in ("par_all36m_prot.prm", "toppar_water_ions.str"):
+                shutil.copyfile(bundled / filename, stage / filename)
+            if temp_str_path is not None:
+                shutil.copyfile(temp_str_path, stage / "ligand.str")
+
+            files = ["ionized.psf", "ionized.pdb", _CGENFF_PARAMETERS, "par_all36m_prot.prm", "toppar_water_ions.str"]
+            if temp_str_path is not None:
+                files.append("ligand.str")
+            missing = [name for name in files if not (stage / name).is_file()]
+            if missing:
+                raise RuntimeError(f"Incomplete system output: {', '.join(missing)}")
+            for name in files:
+                (stage / name).replace(final_dir / name)
+            if temp_str_path is None:
+                (final_dir / "ligand.str").unlink(missing_ok=True)
+        return str(final_dir / "ionized.psf"), str(final_dir / "ionized.pdb")
+
     def copy_openmm_scripts(self, destination_dir: str, enhanced_sampling: bool = False) -> None:
         """
         Copy OpenMM scripts (equilibration.py, MMGBSA.py) to the specified destination.
