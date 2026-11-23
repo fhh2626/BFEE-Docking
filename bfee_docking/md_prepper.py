@@ -3374,6 +3374,20 @@ class MDPrepper:
         return title.rstrip(b"\r\n") == _AUTOCGENFF_STREAM_TITLE
 
     @staticmethod
+    def _bundled_cgenff_v5_dir() -> pathlib.Path:
+        upgrade = "Install AutoCGENFF 20261123.1 or later to use bundled CGenFF 5.0 data."
+        try:
+            import autocgenff
+        except ModuleNotFoundError as exc:
+            if exc.name != "autocgenff":
+                raise
+            raise RuntimeError(upgrade) from exc
+        resolve = getattr(autocgenff, "bundled_force_field_dir", None)
+        if resolve is None:
+            raise RuntimeError(upgrade)
+        return resolve()
+
+    @staticmethod
     def _validate_cgenff_v5(directory: pathlib.Path, filenames: tuple[str, ...]) -> None:
         for name in filenames:
             path = directory / name
@@ -3404,50 +3418,58 @@ class MDPrepper:
         rdkit.Chem.MolToPDBFile(molecule, str(output_path))
 
     def process_ligand(self, cgenff_dir: str = "") -> str:
-        """Prepare PDB/MOL2 and return the absolute path to the new AutoCGENFF stream."""
+        """Prepare ligand files using bundled CGenFF data unless explicitly overridden."""
         fixed_dir = pathlib.Path(self._output_dir) / "md_prepper" / "fixed_files"
         fixed_dir.mkdir(parents=True, exist_ok=True)
-        pdb_path = pathlib.Path(self._ligand_pdb_path)
         output_str = fixed_dir / "ligand.str"
+        output_auto_pdb = fixed_dir / "ligand_autocgenff.pdb"
+        if output_str.is_symlink() or (output_str.exists() and (
+            not output_str.is_file() or not self._is_autocgenff_stream(output_str)
+        )):
+            raise ValueError(f"Move or rename your existing file before processing: {output_str}")
 
         with tempfile.TemporaryDirectory(dir=fixed_dir) as tmp:
             stage = pathlib.Path(tmp)
             pose = stage / "ligand.pdb"
-            shutil.copyfile(pdb_path, pose)
+            shutil.copyfile(self._ligand_pdb_path, pose)
             molecule = self._write_ligand_mol2(pose, self._ligand_smiles, stage / "ligand.mol2")
             (stage / "ligand_input.smi").write_text(self._ligand_smiles, encoding="utf-8")
 
-            # Never replace a user-supplied file, or leave an old generated stream
-            # next to coordinates from a different pose after a failed assignment.
-            if output_str.is_symlink() or (output_str.exists() and (
-                not output_str.is_file() or not self._is_autocgenff_stream(output_str)
-            )):
-                raise ValueError(f"Move or rename your existing file before processing: {output_str}")
-            output_str.unlink(missing_ok=True)
-            (fixed_dir / "ligand_autocgenff.pdb").unlink(missing_ok=True)
-            for filename in ("ligand.mol2", "ligand.pdb", "ligand_input.smi"):
-                (stage / filename).replace(fixed_dir / filename)
+            def publish_pose():
+                # Never leave an old stream paired with newly published coordinates.
+                output_str.unlink(missing_ok=True)
+                output_auto_pdb.unlink(missing_ok=True)
+                for name in ("ligand.mol2", "ligand.pdb", "ligand_input.smi"):
+                    (stage / name).replace(fixed_dir / name)
 
-            if not cgenff_dir.strip():
-                raise ValueError("Select the CGenFF 5.0 force-field directory, or supply your own ligand topology file.")
-            source = pathlib.Path(cgenff_dir).expanduser().resolve()
             base_files = (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS, _CGENFF_INCREMENTS)
-            missing = [name for name in base_files if not (source / name).is_file()]
-            if missing:
-                raise FileNotFoundError(f"Missing CGenFF 5.0 files in {source}: {', '.join(missing)}")
-
-            # Parameterize against a copy and save the matching base RTF/PRM for PSF/MD.
-            for filename in base_files:
-                shutil.copyfile(source / filename, stage / filename)
-            self._validate_cgenff_v5(stage, base_files)
-            self._write_ligand_stream(molecule, stage, stage / "ligand.str")
-            auto_pdb = stage / "ligand_autocgenff.pdb"
-            self._write_autocgenff_pdb(molecule, auto_pdb)
+            auto_pdb = stage / output_auto_pdb.name
             saved_base = fixed_dir / _CGENFF_V5_DIR
-            saved_base.mkdir(exist_ok=True)
-            for filename in (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS):
-                (stage / filename).replace(saved_base / filename)
-            auto_pdb.replace(fixed_dir / auto_pdb.name)
+            try:
+                source = (pathlib.Path(cgenff_dir).expanduser().resolve()
+                          if cgenff_dir.strip() else self._bundled_cgenff_v5_dir())
+                # Parameterize against a copy and save its matching base RTF/PRM for PSF/MD.
+                for name in base_files:
+                    shutil.copyfile(source / name, stage / name)
+                self._validate_cgenff_v5(stage, base_files)
+                self._write_ligand_stream(molecule, stage, stage / "ligand.str")
+                self._write_autocgenff_pdb(molecule, auto_pdb)
+                saved_base.mkdir(exist_ok=True)
+            except Exception:
+                # On retry, retain valid outputs for the same pose and SMILES.
+                # For a new ligand, publish only the files usable with manual topology.
+                if not output_str.is_file() or not all(
+                    (fixed_dir / name).is_file()
+                    and (fixed_dir / name).read_bytes() == (stage / name).read_bytes()
+                    for name in ("ligand.pdb", "ligand_input.smi")
+                ):
+                    publish_pose()
+                raise
+
+            publish_pose()
+            for name in (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS):
+                (stage / name).replace(saved_base / name)
+            auto_pdb.replace(output_auto_pdb)
             (stage / "ligand.str").replace(output_str)
 
         return str(output_str)
@@ -3467,7 +3489,7 @@ class MDPrepper:
         elif cgenff_dir.strip():
             base = pathlib.Path(cgenff_dir).expanduser().resolve()
         else:
-            raise FileNotFoundError(f"Select the CGenFF 5.0 directory for {ligand_path.name}.")
+            base = cls._bundled_cgenff_v5_dir()
         cls._validate_cgenff_v5(base, (_CGENFF_TOPOLOGY, _CGENFF_PARAMETERS))
         return base
 
@@ -3502,7 +3524,7 @@ class MDPrepper:
             salt_concentration: Salt concentration in M
             temp_output_path: Directory for intermediate files
             output_path: Directory for final output files
-            cgenff_dir: Base CGenFF 5.0 directory for externally generated AutoCGENFF streams
+            cgenff_dir: Optional Python-only override for v5 streams without a saved base
 
         Returns:
             Tuple of (final_psf_path, final_pdb_path)

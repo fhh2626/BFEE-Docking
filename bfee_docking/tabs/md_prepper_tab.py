@@ -41,17 +41,6 @@ class MDPrepperTab(QWidget):
         
         pdb_prep_layout.addLayout(vmd_path_layout)
 
-        cgenff_layout = QHBoxLayout()
-        cgenff_layout.addWidget(QLabel("CGenFF 5.0 directory:"))
-        self._cgenff_dir_edit = QLineEdit(self.main_window._cgenff_dir)
-        self._cgenff_dir_edit.setPlaceholderText("Select the local CGenFF 5.0 force-field directory...")
-        self._cgenff_dir_edit.editingFinished.connect(self._save_cgenff_dir)
-        cgenff_layout.addWidget(self._cgenff_dir_edit)
-        browse_cgenff_btn = QPushButton("Browse")
-        browse_cgenff_btn.clicked.connect(self._browse_cgenff_dir)
-        cgenff_layout.addWidget(browse_cgenff_btn)
-        pdb_prep_layout.addLayout(cgenff_layout)
-
         # pH and Process buttons
         process_layout = QHBoxLayout()
         
@@ -225,22 +214,6 @@ class MDPrepperTab(QWidget):
             self.main_window._vmd_path = path
             self.main_window._save_settings()
 
-    def _save_cgenff_dir(self):
-        directory = self._cgenff_dir_edit.text().strip()
-        if directory != self.main_window._cgenff_dir:
-            self.main_window._cgenff_dir = directory
-            self.main_window._save_settings()
-
-    def _browse_cgenff_dir(self):
-        directory = QFileDialog.getExistingDirectory(
-            self, "Select CGenFF 5.0 Force-Field Directory",
-            self._cgenff_dir_edit.text().strip() or self.main_window._last_dir,
-        )
-        if directory:
-            self._cgenff_dir_edit.setText(directory)
-            self.main_window._last_dir = directory
-            self._save_cgenff_dir()
-
     def _md_process_protein(self):
         """Process protein using MDPrepper."""
         # Validate output directory
@@ -344,7 +317,7 @@ class MDPrepperTab(QWidget):
                 vmd_path=None,
             )
             
-            str_path = prepper.process_ligand(cgenff_dir=self._cgenff_dir_edit.text().strip())
+            str_path = prepper.process_ligand()
             self._ligand_str_edit.setText(str_path)
             self.main_window._show_info("Success", f"Ligand processed successfully!\nCHARMM stream: {str_path}")
             
@@ -446,7 +419,6 @@ class MDPrepperTab(QWidget):
                 salt_concentration=salt_concentration,
                 temp_output_path=str(temp_files_dir),
                 output_path=str(md_files_dir),
-                cgenff_dir=self._cgenff_dir_edit.text().strip(),
             )
 
             # The backend publishes the new system and matching force-field files together.

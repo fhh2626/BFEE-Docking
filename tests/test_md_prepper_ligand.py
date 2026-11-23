@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
@@ -52,15 +52,17 @@ class LigandPrepTests(unittest.TestCase):
 
     def test_process_ligand_and_preserve_matching_base_files(self):
         self.molecule = object()
-        with patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", return_value=self.base), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
              patch.object(self.prepper, "_write_ligand_stream", side_effect=self.stub_stream), \
              patch.object(self.prepper, "_write_autocgenff_pdb", side_effect=lambda _, p: p.touch()):
-            self.assertEqual(self.prepper.process_ligand(str(self.base)), str(self.stream))
-            self.assertEqual(self.prepper.process_ligand(str(self.base)), str(self.stream))
+            self.assertEqual(self.prepper.process_ligand(), str(self.stream))
+            self.assertEqual(self.prepper.process_ligand(), str(self.stream))
         self.assertTrue(self.stream.is_file())
         self.assertEqual(self.stream.with_suffix(".pdb").read_bytes(), self.source.read_bytes())
         self.assertTrue(self.stream.with_suffix(".mol2").is_file())
-        saved = self.prepper.get_ligand_force_field_dir(self.stream, "a different directory")
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", side_effect=AssertionError("use the saved copy")):
+            saved = self.prepper.get_ligand_force_field_dir(self.stream)
         self.assertEqual(saved, self.fixed / "cgenff_v5")
         self.assertEqual((saved / "par_all36_cgenff.prm").read_bytes(),
                          (self.base / "par_all36_cgenff.prm").read_bytes())
@@ -69,13 +71,57 @@ class LigandPrepTests(unittest.TestCase):
         self.molecule = object()
         self.fixed.mkdir()
         self.stream.write_text("* AutoCGENFF local-v5 ligand stream\n", encoding="ascii")
-        with patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", return_value=self.base), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
              patch.object(self.prepper, "_write_ligand_stream", side_effect=ValueError("unsupported ligand")):
             with self.assertRaisesRegex(ValueError, "unsupported ligand"):
-                self.prepper.process_ligand(str(self.base))
+                self.prepper.process_ligand()
         self.assertFalse(self.stream.exists())
         self.assertEqual(self.stream.with_suffix(".pdb").read_bytes(), self.source.read_bytes())
         self.assertTrue(self.stream.with_suffix(".mol2").is_file())
+
+    def test_bundled_force_field_reports_old_or_missing_autocgenff(self):
+        for module in (None, SimpleNamespace(__version__="20261123")):
+            with self.subTest(module=module), patch.dict("sys.modules", {"autocgenff": module}):
+                with self.assertRaisesRegex(RuntimeError, "Install AutoCGENFF 20261123.1 or later"):
+                    self.prepper._bundled_cgenff_v5_dir()
+
+    def test_failed_retry_preserves_previous_outputs_for_unchanged_ligand(self):
+        self.molecule = object()
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", return_value=self.base), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
+             patch.object(self.prepper, "_write_ligand_stream", side_effect=self.stub_stream), \
+             patch.object(self.prepper, "_write_autocgenff_pdb", side_effect=lambda _, p: p.touch()):
+            self.prepper.process_ligand()
+        before = {p.relative_to(self.fixed): p.read_bytes() for p in self.fixed.rglob("*") if p.is_file()}
+
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", side_effect=RuntimeError("upgrade required")), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2):
+            with self.assertRaisesRegex(RuntimeError, "upgrade required"):
+                self.prepper.process_ligand()
+        after = {p.relative_to(self.fixed): p.read_bytes() for p in self.fixed.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
+
+        # With a different pose, an old stream must still be invalidated.
+        self.source.write_text("different pose\n", encoding="ascii")
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", side_effect=RuntimeError("upgrade required")), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2):
+            with self.assertRaisesRegex(RuntimeError, "upgrade required"):
+                self.prepper.process_ligand()
+        self.assertFalse(self.stream.exists())
+        self.assertFalse((self.fixed / "ligand_autocgenff.pdb").exists())
+        self.assertEqual((self.fixed / "ligand.pdb").read_bytes(), self.source.read_bytes())
+
+    def test_explicit_force_field_remains_available_to_python_callers(self):
+        self.molecule = object()
+        external = self.output / "external.str"
+        external.write_text("* For use with CGenFF version 5.0\nRESI LIG 0\n", encoding="ascii")
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", side_effect=AssertionError("use explicit data")), \
+             patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2), \
+             patch.object(self.prepper, "_write_ligand_stream", side_effect=self.stub_stream), \
+             patch.object(self.prepper, "_write_autocgenff_pdb", side_effect=lambda _, p: p.touch()):
+            self.assertEqual(self.prepper.process_ligand(cgenff_dir=str(self.base)), str(self.stream))
+            self.assertEqual(self.prepper.get_ligand_force_field_dir(external, str(self.base)), self.base)
 
     def test_does_not_overwrite_a_manually_supplied_stream(self):
         self.molecule = object()
@@ -83,7 +129,7 @@ class LigandPrepTests(unittest.TestCase):
         self.stream.write_text("custom topology\n", encoding="ascii")
         with patch.object(self.prepper, "_write_ligand_mol2", side_effect=self.stub_mol2):
             with self.assertRaisesRegex(ValueError, "Move or rename your existing file"):
-                self.prepper.process_ligand(str(self.base))
+                self.prepper.process_ligand()
         self.assertEqual(self.stream.read_text(encoding="ascii"), "custom topology\n")
 
     def test_psf_uses_current_stream_and_corresponding_base(self):
@@ -100,11 +146,16 @@ class LigandPrepTests(unittest.TestCase):
         self.prepper.ionize_system = Mock(side_effect=self.stub_ionize)
 
         for selected, base in ((self.stream, self.base), (manual, third_party_tools.get_force_field_dir())):
-            with self.subTest(selected=selected.name):
+            with self.subTest(selected=selected.name), \
+                 patch.object(MDPrepper, "_bundled_cgenff_v5_dir", return_value=self.base) as bundled:
                 self.prepper.generate_system_psf(
                     "protein.pdb", str(self.source), str(selected), 15.0, "NaCl", 0.1,
-                    str(temp_dir), str(md_dir), cgenff_dir=str(self.base),
+                    str(temp_dir), str(md_dir),
                 )
+                if selected == manual:
+                    bundled.assert_not_called()
+                else:
+                    bundled.assert_called_once_with()
                 topologies = self.prepper.generate_ligand_psf.call_args.kwargs["topology_files"]
                 self.assertEqual(Path(topologies[0]), base / "top_all36_cgenff.rtf")
                 self.assertEqual((md_dir / "par_all36_cgenff.prm").read_bytes(),
@@ -115,15 +166,14 @@ class LigandPrepTests(unittest.TestCase):
                     self.assertIn("read rtf card append", exported)
                     self.assertIn("RESI MYL", manual.read_text(encoding="ascii"))
 
-    def test_manual_v5_stream_requires_matching_base(self):
+    def test_manual_v5_stream_uses_bundled_base(self):
         stream = self.output / "download.str"
         stream.write_text("* For use with CGenFF version 5.0\nRESI LIG 0\n", encoding="ascii")
-        with self.assertRaisesRegex(FileNotFoundError, "Select the CGenFF 5.0 directory"):
-            self.prepper.get_ligand_force_field_dir(stream)
-        self.assertEqual(self.prepper.get_ligand_force_field_dir(stream, str(self.base)), self.base)
-        (self.base / "top_all36_cgenff.rtf").write_text("* CGenFF Force Field v. 4.6\n", encoding="ascii")
-        with self.assertRaisesRegex(ValueError, "Expected a CGenFF 5.0 data file"):
-            self.prepper.get_ligand_force_field_dir(stream, str(self.base))
+        with patch.object(MDPrepper, "_bundled_cgenff_v5_dir", return_value=self.base):
+            self.assertEqual(self.prepper.get_ligand_force_field_dir(stream), self.base)
+            (self.base / "top_all36_cgenff.rtf").write_text("* CGenFF Force Field v. 4.6\n", encoding="ascii")
+            with self.assertRaisesRegex(ValueError, "Expected a CGenFF 5.0 data file"):
+                self.prepper.get_ligand_force_field_dir(stream)
 
     def test_incompatible_pose_is_not_mapped_by_index(self):
         molecule = Chem.AddHs(Chem.MolFromSmiles("CCO"))
@@ -146,8 +196,7 @@ class LigandPrepTests(unittest.TestCase):
                 self.prepper._run_vmd_outputs(*args)
         self.assertEqual(path.read_text(encoding="ascii"), "previous run")
 
-    @unittest.skipUnless(os.environ.get("AUTOCGENFF_V5_DIR") and os.environ.get("BFEE_TEST_VMD"),
-                         "set AUTOCGENFF_V5_DIR and BFEE_TEST_VMD for full PSF assembly")
+    @unittest.skipUnless(os.environ.get("BFEE_TEST_VMD"), "set BFEE_TEST_VMD for full PSF assembly")
     def test_full_system_retains_ligand_lone_pairs(self):
         protein = self.output / "protein [test].pdb"
         molecule = Chem.AddHs(Chem.MolFromSequence("AAA"))
@@ -158,7 +207,7 @@ class LigandPrepTests(unittest.TestCase):
         molecule = Chem.AddHs(Chem.MolFromSmiles(self.prepper._ligand_smiles))
         self.assertEqual(AllChem.EmbedMolecule(molecule, randomSeed=19), 0)
         Chem.MolToPDBFile(Chem.RemoveHs(molecule), str(self.source))
-        stream = Path(self.prepper.process_ligand(os.environ["AUTOCGENFF_V5_DIR"]))
+        stream = Path(self.prepper.process_ligand())
         pose = stream.with_name("ligand_autocgenff.pdb")
         self.assertEqual(sum(line.startswith("HETATM") for line in pose.read_text().splitlines()), 12)
         psf, _ = self.prepper.generate_system_psf(
@@ -185,14 +234,13 @@ energy = context.getState(getEnergy=True).getPotentialEnergy().value_in_unit(kil
 assert math.isfinite(energy), energy
 """], cwd=Path(psf).parent, check=True, timeout=60)
 
-    @unittest.skipUnless(os.environ.get("AUTOCGENFF_V5_DIR"), "set AUTOCGENFF_V5_DIR for real assignment")
     def test_real_assignment_and_optional_psfgen(self):
         molecule = Chem.AddHs(Chem.MolFromSmiles("CCO"))
         self.assertEqual(AllChem.EmbedMolecule(molecule, randomSeed=19), 0)
         # Exercise a non-UNL docked residue and a pose missing nonpolar hydrogens.
         pose = Chem.MolToPDBBlock(Chem.RemoveHs(molecule)).replace(" UNL ", " MOL ")
         self.source.write_text(pose, encoding="ascii")
-        stream = Path(self.prepper.process_ligand(os.environ["AUTOCGENFF_V5_DIR"]))
+        stream = Path(self.prepper.process_ligand())
         names = [line.split()[1] for line in stream.read_text().splitlines() if line.startswith("ATOM ")]
         self.assertEqual(len(names), 9)
         self.assertTrue({"C1", "C2", "O1"}.issubset(names))
@@ -243,11 +291,12 @@ class LigandPrepGuiTests(unittest.TestCase):
             (fixed_dir / "ligand.pdb").touch()
             (fixed_dir / "ligand_input.smi").write_text("CCO", encoding="ascii")
             main = SimpleNamespace(
-                _output_directory=temp, _vmd_path="test-vmd", _cgenff_dir=temp, _last_dir=temp,
+                _output_directory=temp, _vmd_path="test-vmd", _last_dir=temp,
                 _show_info=Mock(), _show_warning=Mock(), _show_error=Mock(),
             )
             tab = MDPrepperTab(main)
             self.addCleanup(tab.close)
+            self.assertFalse(any("CGenFF 5.0 directory" in label.text() for label in tab.findChildren(QLabel)))
             auto = str(working / "fixed_files" / "ligand.str")
             manual = str(output / "manual.top")
             with patch("bfee_docking.tabs.md_prepper_tab.md_prepper.MDPrepper") as factory:
@@ -256,7 +305,7 @@ class LigandPrepGuiTests(unittest.TestCase):
                 backend.generate_system_psf.return_value = ("ionized.psf", "ionized.pdb")
                 tab._md_process_ligand_btn.click()
                 self.assertEqual(tab._ligand_str_edit.text(), auto)
-                backend.process_ligand.assert_called_once_with(cgenff_dir=temp)
+                backend.process_ligand.assert_called_once_with()
 
                 with patch.object(QFileDialog, "getOpenFileName", return_value=(manual, "")) as browse:
                     tab._browse_ligand_str_file()

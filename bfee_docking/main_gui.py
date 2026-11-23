@@ -56,7 +56,6 @@ class MainWindow(QMainWindow):
         self._docking_worker = None
         self._detected_pockets = []  # Store detected pocket regions from pocketeer
         self._vmd_path = None
-        self._cgenff_dir = ""
         self._saved_theme = None  # Store the saved theme name
         
         # Remember last used directory for better UX (shared across all browse buttons)
@@ -189,7 +188,6 @@ class MainWindow(QMainWindow):
                 if "General" in config:
                     if "vmd_path" in config["General"]:
                         self._vmd_path = config["General"]["vmd_path"]
-                    self._cgenff_dir = config["General"].get("cgenff_dir", "")
                     if "theme" in config["General"]:
                         self._saved_theme = config["General"]["theme"]
             except Exception as e:
@@ -209,10 +207,6 @@ class MainWindow(QMainWindow):
             
         if self._vmd_path:
             config["General"]["vmd_path"] = self._vmd_path
-        if self._cgenff_dir:
-            config["General"]["cgenff_dir"] = self._cgenff_dir
-        else:
-            config["General"].pop("cgenff_dir", None)
 
         if hasattr(self, '_theme_combo') and self._theme_combo.currentText():
             config["General"]["theme"] = self._theme_combo.currentText()

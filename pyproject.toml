@@ -12,7 +12,7 @@ authors = [
   { name = "Haohao Fu", email = "fhh2626@gmail.com" }
 ]
 dependencies = [
-  "autocgenff>=20261123",
+  "autocgenff>=20261123.1",
   "biotite",
   "biopython",
   "dimorphite-dl",
