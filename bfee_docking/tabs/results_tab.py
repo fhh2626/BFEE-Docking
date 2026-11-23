@@ -55,6 +55,7 @@ class ResultsTab(QWidget):
         layout.addWidget(self._results_table)
 
         actions = QHBoxLayout()
+        actions.addStretch()
         self._sort_results_btn = QPushButton("Sort by Best Affinity")
         self._sort_results_btn.clicked.connect(self._sort_results_table)
         actions.addWidget(self._sort_results_btn)
@@ -78,6 +79,7 @@ class ResultsTab(QWidget):
         group = QGroupBox("Selected Pose")
         layout = QVBoxLayout(group)
         selection = QHBoxLayout()
+        selection.addStretch()
 
         selection.addWidget(QLabel("Molecule"))
         self._molecule_input = QLineEdit("0")
@@ -94,14 +96,17 @@ class ResultsTab(QWidget):
         self._pose_combo.setMinimumContentsLength(22)
         self._pose_combo.view().setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         selection.addWidget(self._pose_combo)
-
-        self._pose_hint = QLabel()
-        self._pose_hint.setForegroundRole(QPalette.PlaceholderText)
-        selection.addWidget(self._pose_hint)
         selection.addStretch()
         layout.addLayout(selection)
 
+        self._pose_hint = QLabel()
+        self._pose_hint.setForegroundRole(QPalette.PlaceholderText)
+        self._pose_hint.setAlignment(Qt.AlignHCenter)
+        self._pose_hint.setWordWrap(True)
+        layout.addWidget(self._pose_hint)
+
         actions = QHBoxLayout()
+        actions.addStretch()
         self._show_in_pymol_btn = QPushButton("Show in PyMOL")
         self._show_in_pymol_btn.clicked.connect(self._show_in_pymol)
         actions.addWidget(self._show_in_pymol_btn)
@@ -143,15 +148,15 @@ class ResultsTab(QWidget):
         preview.addWidget(self._redocking_size_input)
         layout.addLayout(preview)
 
-        actions = QHBoxLayout()
         self._apply_redocking_btn = QPushButton("Apply to Protein Tab")
         self._apply_redocking_btn.clicked.connect(self._apply_redocking_range)
-        actions.addWidget(self._apply_redocking_btn)
+        layout.addWidget(self._apply_redocking_btn, alignment=Qt.AlignHCenter)
+
         self._redocking_hint = QLabel()
         self._redocking_hint.setTextFormat(Qt.PlainText)
         self._redocking_hint.setWordWrap(True)
-        actions.addWidget(self._redocking_hint, 1)
-        layout.addLayout(actions)
+        self._redocking_hint.setAlignment(Qt.AlignHCenter)
+        layout.addWidget(self._redocking_hint)
         return group
 
     def _molecule_index(self):
@@ -238,7 +243,7 @@ class ResultsTab(QWidget):
                 self._pose_combo.setCurrentIndex(max(0, index))
 
         if not self._pose_affinities:
-            hint = "Run docking or load results to select a pose."
+            hint = ""
         elif molecule not in self._pose_affinities:
             hint = "Enter a molecule number from the Results table."
         elif not affinities:
@@ -314,11 +319,12 @@ class ResultsTab(QWidget):
             center, size = box
             self._redocking_center_input.setText(self._format_coordinates(center))
             self._redocking_size_input.setText(self._format_coordinates(size))
-            self._redocking_hint.setText("Sets Specify Manually and switches to the Protein tab.")
+            hint = "Sets Specify Manually and switches to the Protein tab."
         else:
             self._redocking_center_input.clear()
             self._redocking_size_input.clear()
-            self._redocking_hint.setText(hint)
+        self._redocking_hint.setText(hint)
+        self._redocking_hint.setVisible(bool(hint))
 
     def _update_redocking_preview(self):
         selection = self._selected_pose()

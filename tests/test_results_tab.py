@@ -291,4 +291,5 @@ class ResultsTabTests(unittest.TestCase):
         self.assertEqual(self.results._pose_combo.count(), 0)
         self.assertFalse(self.results._sort_results_btn.isEnabled())
         self.assertFalse(self.results._apply_redocking_btn.isEnabled())
-        self.assertIn("Run docking", self.results._pose_hint.text())
+        self.assertEqual(self.results._pose_hint.text(), "")
+        self.assertTrue(self.results._pose_hint.isHidden())
